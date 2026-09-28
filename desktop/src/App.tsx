@@ -2,7 +2,7 @@
 import { useEffect, useRef, useState } from "react";
 import { SlidersHorizontal, Headphones, Settings2, Layers3, Keyboard, Usb, RefreshCw } from "lucide-react";
 import brandIcon from "../assets/branding/ssgg.svg";
-import type { Snapshot, RuntimeInfo, DesktopBridge } from "./shared/contracts";
+import { mutationTimeout, type Snapshot, type RuntimeInfo, type DesktopBridge } from "./shared/contracts";
 import Mixer from "./Mixer";
 import Devices from "./Devices";
 import Profiles from "./Profiles";
@@ -18,27 +18,35 @@ export default function App() {
   const [notice, setNotice] = useState("");
   const epoch = useRef(0),
     refreshing = useRef(false),
-    mutating = useRef(false);
+    mutating = useRef(false),
+    indeterminate = useRef(false);
   async function mutate(action: (bridge: DesktopBridge) => Promise<unknown>, message = "Change saved") {
     if (!window.ssgg || mutating.current) return;
     mutating.current = true;
     epoch.current++;
     setBusy(true);
     setNotice("");
+    indeterminate.current = false;
     try {
       await action(window.ssgg);
       setSnapshot(await window.ssgg.getState());
       setError("");
       setNotice(message);
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Change failed. Try again.");
+      const message = e instanceof Error ? e.message : "Change failed. Try again.";
+      if (message.includes(mutationTimeout)) {
+        indeterminate.current = true;
+        // This read is a snapshot, not proof that the timed-out command has finished.
+        try { setSnapshot(await window.ssgg.getState()); } catch { /* Preserve the last known state and warning. */ }
+      }
+      setError(message);
     } finally {
       mutating.current = false;
       setBusy(false);
     }
   }
 
-  async function refresh() {
+  async function refresh(explicit = false) {
     if (!window.ssgg) {
       setError("Desktop bridge unavailable");
       setLoading(false);
@@ -54,7 +62,12 @@ export default function App() {
       if (current === epoch.current) {
         setRuntime(nextRuntime);
         setSnapshot(next);
-        setError("");
+        if (!indeterminate.current || explicit) {
+          setError("");
+          if (explicit && indeterminate.current)
+            setNotice("Current state refreshed. A timed-out change may still complete; verify before retrying.");
+          indeterminate.current = false;
+        }
       }
     } catch (e) {
       if (current === epoch.current) {
@@ -174,7 +187,7 @@ export default function App() {
                     : "A few preferences. No distractions."}
             </p>
           </div>
-          <button className="icon-button" onClick={() => void refresh()} aria-label="Refresh audio and devices">
+          <button className="icon-button" onClick={() => void refresh(true)} aria-label="Refresh audio and devices">
             <RefreshCw size={18} />
           </button>
         </header>
@@ -192,7 +205,9 @@ export default function App() {
               <strong>{error.includes("Audio service unavailable") ? "Audio service unavailable" : error}</strong>
               <p>
                 {snapshot
-                  ? "The change was not confirmed. Refresh to read the current audio state, then try again."
+                  ? indeterminate.current
+                    ? "The service did not respond in time. The displayed state is a snapshot, not confirmation that the change finished. Refresh and verify before retrying."
+                    : "The change was not confirmed. Refresh to read the current audio state, then try again."
                   : "Check the matching SSGG service, then refresh to reconnect. Controls stay unavailable until a fresh snapshot is received."}
               </p>
             </div>

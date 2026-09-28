@@ -1,16 +1,18 @@
 import { z } from "zod";
+export const mutationTimeout = "Audio service response timed out; change may still complete. Refresh to reconcile current state before retrying.";
 export const identifier = z.string().min(1).max(256);
+export const numericId = z.string().max(10).regex(/^(0|[1-9][0-9]*)$/).refine((value) => Number(value) <= 4294967295, "ID exceeds u32");
 export const gain = z.number().finite().min(0).max(1);
 const observedGain = z.number().finite().min(0).max(65536); // Pulse u32 fixed-point volume; writes remain 0..1.
 export const inputMode = z.enum(["software", "hardware"]);
 export const groupId = z.enum(["game", "chat", "media", "unmanaged"]);
 export const side = z.enum(["a", "b", "none"]);
-const profileName = z
+export const profileName = z
   .string()
   .min(1)
   .refine(
-    (v) => v.trim().length > 0 && new TextEncoder().encode(v).length <= 80,
-    "Use a nonempty profile name of at most 80 UTF-8 bytes",
+    (v) => v.trim().length > 0 && new TextEncoder().encode(v).length <= 80 && !/\p{Cc}/u.test(v),
+    "Use a nonempty profile name of at most 80 UTF-8 bytes without control characters",
   );
 const patchFields = <T extends z.ZodRawShape>(shape: T) =>
   z
@@ -36,6 +38,7 @@ const schemas: Record<string, z.ZodTypeAny> = {
     volume: gain.optional(),
     muted: z.boolean().optional(),
     group: groupId.optional(),
+    sinkId: numericId.optional(),
   }),
   "group.set": patchFields({
     id: groupId.exclude(["unmanaged"]),
@@ -82,7 +85,14 @@ export const streamSchema = z.object({
   effectiveMuted: z.boolean().optional(),
   muted: z.boolean(),
   group: groupId,
-  sinkId: z.union([z.string(), z.number()]).nullable().optional(),
+  sinkId: numericId.nullable().optional(),
+});
+export const sinkSchema = z.object({
+  id: numericId,
+  name: z.string().max(512),
+  description: z.string().max(512),
+  volume: observedGain,
+  muted: z.boolean(),
 });
 export const groupSchema = z.object({
   id: groupId.exclude(["unmanaged"]),
@@ -144,6 +154,7 @@ export const deviceSchema = z.object({
 export const snapshotSchema = z.object({
   readOnly: z.boolean().optional(),
   streams: z.array(streamSchema).max(1024),
+  sinks: z.array(sinkSchema).max(256).default([]),
   groups: z.array(groupSchema).max(3),
   devices: z.array(deviceSchema).max(128),
   chatmix: z.object({
@@ -157,11 +168,13 @@ export const snapshotSchema = z.object({
   audio: z.object({ available: z.boolean(), reason: z.string().optional() }),
   profiles: z.array(z.object({ name: profileName })).default([]),
 });
-export type Snapshot = z.infer<typeof snapshotSchema>;
+// Legacy/fixture snapshots have no sink inventory; the parsed bridge defaults it to [].
+export type Snapshot = Omit<z.infer<typeof snapshotSchema>, "sinks"> & { sinks?: Sink[] };
 export type Stream = z.infer<typeof streamSchema>;
+export type Sink = z.infer<typeof sinkSchema>;
 export type Group = z.infer<typeof groupSchema>;
 export type Device = z.infer<typeof deviceSchema>;
-export type StreamPatch = { id: string; volume?: number; muted?: boolean; group?: Stream["group"] };
+export type StreamPatch = { id: string; volume?: number; muted?: boolean; group?: Stream["group"]; sinkId?: string };
 export type GroupPatch = { id: Group["id"]; volume?: number; muted?: boolean; wheelSide?: Group["wheelSide"] };
 export type RuntimeInfo = {
   readOnly?: boolean;

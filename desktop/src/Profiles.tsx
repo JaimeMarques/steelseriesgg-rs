@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { Layers3, Save, ArrowRight } from "lucide-react";
-import type { Snapshot } from "./shared/contracts";
+import { profileName, type Snapshot } from "./shared/contracts";
 import type { Mutate } from "./Mixer";
 export default function Profiles({
   snapshot,
@@ -12,7 +12,7 @@ export default function Profiles({
   mutate: Mutate;
 }) {
   const [name, setName] = useState("");
-  const valid = name.trim().length > 0 && new TextEncoder().encode(name.trim()).length <= 80;
+  const valid = profileName.safeParse(name.trim()).success;
   return (
     <section className="profiles-page">
       <div className="section-heading">
@@ -45,7 +45,7 @@ export default function Profiles({
         </button>
       </form>
       <p id="profile-name-help" className="helper">
-        Up to 80 UTF-8 bytes (some characters use more than one). Saving an existing name replaces that profile.
+        Up to 80 UTF-8 bytes (some characters use more than one); control characters are not allowed. Saving an existing name replaces that profile.
       </p>
       <div className="profile-list">
         {snapshot?.profiles.length ? (

@@ -54,6 +54,7 @@ export default function Mixer({
   const balance = snapshot?.chatmix.balance ?? 0;
   const hardware = snapshot?.chatmix.inputMode === "hardware";
   const sample = snapshot?.chatmix.wheelAvailable ? snapshot.physical?.sample : null;
+  const sinks = snapshot?.sinks ?? [];
   return (
     <>
       <section className={"balance-panel " + (enabled ? "mix-enabled" : "")} aria-label="ChatMix">
@@ -217,6 +218,18 @@ export default function Mixer({
       )}
       {snapshot && (
         <section className="apps-section">
+          <style>{`
+            .app-table-head, .app-row { grid-template-columns: minmax(130px, 1fr) minmax(90px, 115px) minmax(110px, 150px) minmax(125px, 180px) 36px; }
+            .app-row > select { min-width: 0; }
+            @media (max-width: 1100px) { .app-table-head, .app-row { grid-template-columns: minmax(110px, 1fr) 100px 110px minmax(100px, 135px) 30px; gap: 10px; } }
+            @media (max-width: 850px) {
+              .app-table-head, .app-row { grid-template-columns: minmax(110px, 1fr) 100px 30px; }
+              .app-table-head > span:nth-child(3), .app-table-head > span:nth-child(4) { display: none; }
+              .app-row > select:nth-child(3) { grid-column: 1 / 3; grid-row: 2; }
+              .app-row .app-volume { grid-row: 3; }
+              .app-row .icon-button { grid-column: 3; grid-row: 1; }
+            }
+          `}</style>
           <div className="section-heading">
             <div>
               <h2>
@@ -231,6 +244,7 @@ export default function Mixer({
               <div className="app-table-head">
                 <span>Application / stream</span>
                 <span>Group</span>
+                <span>Output</span>
                 <span>Volume</span>
                 <span className="sr-only">Mute</span>
               </div>
@@ -262,6 +276,21 @@ export default function Mixer({
                       <option key={id} value={id}>
                         {name}
                       </option>
+                    ))}
+                  </select>
+                  <select
+                    aria-label={`${appLabel(stream)} output`}
+                    value={sinks.some((sink) => sink.id === stream.sinkId) ? stream.sinkId ?? "" : ""}
+                    disabled={!ready || readOnly || sinks.length === 0}
+                    onChange={(e) =>
+                      void mutate((b) => b.setStream({ id: stream.id, sinkId: e.target.value }), "Application output updated")
+                    }
+                  >
+                    {!sinks.some((sink) => sink.id === stream.sinkId) && (
+                      <option value="">{sinks.length ? "Current output unavailable" : "No outputs available"}</option>
+                    )}
+                    {sinks.map((sink) => (
+                      <option key={sink.id} value={sink.id}>{sink.description || sink.name}</option>
                     ))}
                   </select>
                   <div className="app-volume">

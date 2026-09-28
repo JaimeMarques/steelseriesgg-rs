@@ -1,4 +1,5 @@
 import type { Readable, Writable } from "node:stream";
+import { mutationTimeout } from "../src/shared/contracts";
 type Pending = {
   resolve: (value: unknown) => void;
   reject: (error: Error) => void;
@@ -27,7 +28,9 @@ export class JsonLineClient {
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(id);
-        reject(new Error("Audio service timed out. Try again."));
+        reject(new Error(["state.get", "streams.list", "settings.get", "profiles.list", "devices.list"].includes(method)
+          ? "Audio service read timed out. Refresh to retry."
+          : mutationTimeout));
       }, this.timeoutMs);
       this.pending.set(id, { resolve, reject, timer });
       this.input.write(JSON.stringify({ id, method, params }) + "\n");
