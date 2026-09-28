@@ -5,6 +5,7 @@ SSGG_PACTL and SSGG_PACAT may point to unpacked distro binaries.
 """
 import json
 import os
+import re
 from pathlib import Path
 import subprocess
 import tempfile
@@ -36,7 +37,44 @@ context.objects = [ { factory = spa-node-factory args = { factory.name = support
 '''
 
 
+def wireplumber_policy_command(config_root: Path) -> list[str]:
+    """Select audited policy components, never a default hardware-monitoring profile."""
+    modern = config_root / "wireplumber.conf"
+    if modern.exists():
+        config = modern.read_text()
+        profile = re.search(r"(?m)^\s*policy\s*=\s*\{([^{}]*)\}", config)
+        if profile:
+            policy = profile[1]
+            assert re.search(r"inherits\s*=\s*\[\s*base\s*\]", policy)
+            assert "policy.standard = required" in policy
+            assert not re.search(r"hardware\.|monitor\.", policy)
+            return ["wireplumber", "--profile=policy"]
+    legacy = config_root / "policy.conf"
+    if legacy.exists():
+        # Strip SPA comment lines before validating the effective component list.
+        policy = "\n".join(line.split("#", 1)[0] for line in legacy.read_text().splitlines())
+        blocks = re.findall(r"wireplumber\.components\s*=\s*\[([^\]]*)\]", policy, re.S)
+        assert len(blocks) == 1, "Expected exactly one WirePlumber component list"
+        components = re.findall(r"\{([^{}]*)\}", blocks[0])
+        assert not re.sub(r"\{[^{}]*\}", "", blocks[0]).strip(), "Unparsed WirePlumber component"
+        parsed = set()
+        for component in components:
+            fields = dict(re.findall(r"\b(name|type)\s*=\s*([\w./-]+)", component))
+            assert len(fields) == 2, "Unknown WirePlumber component field"
+            assert not re.sub(r"\b(?:name|type)\s*=\s*[\w./-]+", "", component).replace(",", "").strip(), "Unexpected component arguments"
+            parsed.add((fields["name"], fields["type"]))
+        assert len(components) == len(parsed), "Duplicate WirePlumber components"
+        assert parsed == {
+            ("libwireplumber-module-lua-scripting", "module"),
+            ("policy.lua", "config/lua"),
+        }, "Legacy policy must load only the Lua engine and policy.lua"
+        assert not re.search(r"api\.(?:alsa|bluez|v4l2|libcamera)\.|monitor\.", policy)
+        return ["wireplumber", "-c", str(legacy)]
+    raise AssertionError("No audited policy-only WirePlumber configuration; refusing to launch a hardware profile")
+
+
 def run():
+    policy_command = wireplumber_policy_command(Path("/usr/share/wireplumber"))
     processes = []
     with tempfile.TemporaryDirectory(prefix="ssgg-audio-isolated-") as tmp:
         root = Path(tmp)
@@ -91,9 +129,9 @@ def run():
                 pa("load-module", "module-null-sink", f"sink_name={name}")
             sinks = json.loads(pa("-f", "json", "list", "sinks"))
             assert {s["name"] for s in sinks} == {"test_a", "test_b"}
-            # Stock 'policy' profile inherits only base + policy.standard, never hardware.*.
-            # No ALSA/Bluetooth/video monitor is loaded; all connections use our private core.
-            spawn(["wireplumber", "--profile=policy"], stdout=logs)
+            # Stock 0.5 policy inherits base; 0.4 policy.conf loads policy.lua only.
+            # No ALSA/Bluetooth/video monitor is loaded; all clients use our private core.
+            spawn(policy_command, stdout=logs)
             wait(lambda: "WirePlumber" in pa("-f", "json", "list", "clients"))
             null_input = open("/dev/zero", "rb")
             app = spawn([pacat, "--playback", "--raw", "--device=test_a", "--client-name=SSGG-Isolated-Game", "--stream-name=Silence", "--property=media.role=game"], stdin=null_input, stdout=logs)
