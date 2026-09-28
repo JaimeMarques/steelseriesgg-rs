@@ -2,7 +2,10 @@ name: Build Linux packages
 
 on:
   push:
-    branches: [feat/install-and-use, feat/ubuntu-packaging, fix/headset-status-expiry]
+    branches: [main]
+  pull_request:
+    branches: [main]
+  merge_group:
   workflow_dispatch:
     inputs:
       features:
@@ -17,10 +20,14 @@ jobs:
   ubuntu-desktop:
     name: Ubuntu 24.04 desktop amd64
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 45
     env:
       RUSTFLAGS: "-Ctarget-cpu=x86-64"
     steps:
+      - name: Require a disposable GitHub-hosted runner
+        env:
+          RUNNER_KIND: ${{ runner.environment }}
+        run: test "$RUNNER_KIND" = github-hosted && test "$RUNNER_OS" = Linux
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v6
         with:
@@ -33,7 +40,7 @@ jobs:
       - name: Install build and isolated test dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential pkg-config libudev-dev libpulse-dev unzip binutils apparmor desktop-file-utils xvfb xauth x11-utils dbus-x11
+          sudo apt-get install -y build-essential pkg-config libudev-dev libpulse-dev unzip binutils apparmor desktop-file-utils xvfb xauth x11-utils dbus-x11 pipewire pipewire-pulse wireplumber pulseaudio-utils
       - name: Install locked JavaScript dependencies
         working-directory: desktop
         run: npm ci --include=dev
@@ -46,6 +53,26 @@ jobs:
           npm run typecheck
           npm test
           npm run test:packaging
+      - name: Exercise real audio only on a private PipeWire-Pulse core
+        env:
+          SSGG_PACTL: /usr/bin/pactl
+          SSGG_PACAT: /usr/bin/pacat
+          SSGG_DESKTOP_BIN: target/debug/ssgg-desktop
+        run: |
+          # The test creates its own HOME, runtime, native/Pulse sockets, null sinks
+          # and policy-only WirePlumber. Never run this against a desktop session.
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+          config = Path('/usr/share/wireplumber/wireplumber.conf').read_text()
+          profile = re.search(r'(?m)^\s*policy\s*=\s*\{([^{}]*)\}', config)
+          assert profile, 'WirePlumber policy profile missing'
+          assert re.search(r'inherits\s*=\s*\[\s*base\s*\]', profile[1]), 'policy must inherit base only'
+          assert 'policy.standard = required' in profile[1]
+          assert not re.search(r'hardware\.|monitor\.', profile[1]), 'policy must not load hardware'
+          PY
+          cargo build --locked --bin ssgg-desktop
+          python3 tests/desktop_isolated.py
       - name: Build real self-contained app and Debian archive
         working-directory: desktop
         run: |
@@ -67,6 +94,8 @@ jobs:
       - name: Exercise the installed launcher without sandbox exceptions
         working-directory: desktop
         run: |
+          # test-session supplies a private bus, Xvfb and unreachable audio socket;
+          # packaged-smoke verifies real Electron seccomp and forbids fixture writes.
           unset CHROME_DEVEL_SANDBOX ELECTRON_RUN_AS_NODE
           node scripts/test-session.mjs node tests/packaged-smoke.mjs /usr/bin/ssgg-gui artifacts/ubuntu-installed.json
       - name: Remove package without touching user state or legacy services
@@ -96,6 +125,10 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 25
     steps:
+      - name: Require a disposable GitHub-hosted runner
+        env:
+          RUNNER_KIND: ${{ runner.environment }}
+        run: test "$RUNNER_KIND" = github-hosted && test "$RUNNER_OS" = Linux
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v6
         with:
@@ -111,6 +144,7 @@ jobs:
       - name: Prepare the tested standalone application
         run: |
           (cd snap-input/release && sha256sum -c ssgg-gui-linux-amd64.tar.xz.sha256)
+          test "$(sed -n 's/^StartupWMClass=//p' snap/gui/ssgg.desktop)" = io.github.MrTheSoulz.SSGG
           mkdir -p desktop/release
           tar -xJf snap-input/release/ssgg-gui-linux-amd64.tar.xz -C desktop/release
           node --test snap/tests/package-snap.test.mjs
