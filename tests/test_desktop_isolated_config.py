@@ -3,10 +3,14 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from desktop_isolated import wireplumber_policy_command
+from desktop_isolated import CORE, wireplumber_policy_command
 
 
 class PolicySelectionTests(unittest.TestCase):
+    def test_private_core_supplies_default_metadata_for_legacy_sink_moves(self):
+        self.assertIn("{ factory = metadata args = { metadata.name = default } }", CORE)
+        self.assertEqual(CORE.count("metadata.name = default"), 1)
+
     def test_modern_policy_inherits_base_without_hardware(self):
         with tempfile.TemporaryDirectory() as root:
             path = Path(root)

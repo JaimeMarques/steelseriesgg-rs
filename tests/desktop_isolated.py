@@ -33,7 +33,7 @@ context.modules = [
  { name = libpipewire-module-link-factory }
  { name = libpipewire-module-access args = { access.legacy = false access.socket = { pipewire-0 = "unrestricted" pipewire-0-manager = "unrestricted" } } }
 ]
-context.objects = [ { factory = spa-node-factory args = { factory.name = support.node.driver node.name = Dummy-Driver node.group = pipewire.dummy node.always-process = true priority.driver = 20000 } } ]
+context.objects = [ { factory = metadata args = { metadata.name = default } } { factory = spa-node-factory args = { factory.name = support.node.driver node.name = Dummy-Driver node.group = pipewire.dummy node.always-process = true priority.driver = 20000 } } ]
 '''
 
 
