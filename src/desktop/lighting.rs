@@ -163,11 +163,15 @@ impl Controller {
             last_sent: BTreeMap::new(),
         }
     }
-    fn select(&mut self, request: &Apply) -> Result<Endpoint, String> {
+    fn validate_request(request: &Apply) -> Result<(), String> {
         request.validate()?;
         if !request.id.starts_with("1038:1642:") {
             return Err("RGB is implemented only for Apex Pro TKL Gen 3 wired (1038:1642)".into());
         }
+        Ok(())
+    }
+    fn select(&mut self, request: &Apply) -> Result<Endpoint, String> {
+        Self::validate_request(request)?;
         let inventory = self.access.inventory()?;
         let candidates: Vec<_> = inventory.iter().filter(|d| d.id == request.id).collect();
         if candidates.len() != 1 || !candidates[0].supported() {
@@ -254,13 +258,13 @@ impl AsyncController {
     }
     pub fn queue(&mut self, request: Apply) -> Result<(), String> {
         self.poll();
-        let controller = self
-            .idle
-            .as_mut()
-            .ok_or("Lighting is busy or its worker unavailable; wait or restart the service")?;
-        // Read-only exact identity validation before acceptance; the worker rechecks it
-        // before opening. No control device is opened on the RPC/audio thread.
-        controller.select(&request)?;
+        // Validate the explicit permission and model cheaply on this thread. The
+        // exact-node inventory is checked in the one-shot worker before open.
+        // Enumeration can block on a stalled keyboard and must not hold RPC/audio.
+        Controller::validate_request(&request)?;
+        if self.idle.is_none() {
+            return Err("Lighting is busy or its worker unavailable; wait or restart the service".into());
+        }
         let mut controller = self.idle.take().ok_or("Lighting worker unavailable")?;
         let id = request.id.clone();
         self.errors.remove(&id);
