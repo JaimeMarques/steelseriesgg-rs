@@ -404,7 +404,7 @@ impl<B: Backend> Service<B> {
                     let mute_changed = !a.pending && stream.muted != a.expected_mute;
                     if volume_changed {
                         a.base = if a.factor > 0.0 {
-                            (stream.effective_volume / a.factor).clamp(0.0, 1.0)
+                            (stream.effective_volume / a.factor).clamp(0.0, f64::from(0x7fff_ffff_u32) / 65536.0)
                         } else {
                             stream.effective_volume
                         };
@@ -587,7 +587,15 @@ impl<B: Backend> Service<B> {
                 {
                     return Err(RpcError::invalid("unknown group"));
                 }
+                let hardware_mix = self.mixer.enabled && self.mixer.input_mode == hardware::InputMode::Hardware;
+                let guard = hardware_mix.then(|| self.hardware.audio_write_guard());
                 self.refresh()?;
+                if guard.as_ref().is_some_and(|g| !g()) {
+                    self.sync_hardware();
+                    return Err(RpcError::backend(
+                        "Physical headset unavailable; audio write cancelled".into(),
+                    ));
+                }
                 let stream = self
                     .snapshot
                     .streams
@@ -609,7 +617,7 @@ impl<B: Backend> Service<B> {
                 };
                 if p.sink_id.is_some() {
                     self.backend
-                        .set_stream(p.id, None, None, p.sink_id)
+                        .set_stream_guarded(p.id, None, None, p.sink_id, &|| guard.as_ref().is_none_or(|g| g()))
                         .map_err(RpcError::backend)?;
                 }
                 let assignment = Assignment {
@@ -807,7 +815,15 @@ impl<B: Backend> Service<B> {
                             "Acquire a fresh connected receiver before applying an enabled hardware profile",
                         ));
                     }
+                    let guard = (profile.mixer.enabled && profile.mixer.input_mode == hardware::InputMode::Hardware)
+                        .then(|| self.hardware.audio_write_guard());
                     self.refresh()?;
+                    if guard.as_ref().is_some_and(|g| !g()) {
+                        self.sync_hardware();
+                        return Err(RpcError::backend(
+                            "Physical headset unavailable; audio write cancelled".into(),
+                        ));
+                    }
                     self.groups = profile.groups;
                     self.mixer = profile.mixer;
                     self.assignments = profile.assignments;
@@ -820,7 +836,9 @@ impl<B: Backend> Service<B> {
                             if let Some(name) = &a.sink {
                                 if let Some(sink) = self.snapshot.sinks.iter().find(|s| &s.name == name) {
                                     self.backend
-                                        .set_stream(stream.id, None, None, Some(sink.id))
+                                        .set_stream_guarded(stream.id, None, None, Some(sink.id), &|| {
+                                            guard.as_ref().is_none_or(|g| g())
+                                        })
                                         .map_err(RpcError::backend)?;
                                 }
                             }
