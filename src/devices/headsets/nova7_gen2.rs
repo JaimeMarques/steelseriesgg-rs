@@ -327,7 +327,18 @@ impl<T: Transport> Nova7Gen2<T> {
     /// Raw four-level sidetone (0 off, 1 low, 2 medium, 3 high). Success means
     /// both writes completed, not that hardware readback has verified persistence.
     pub fn set_sidetone_level(&mut self, level: u8) -> Result<()> {
+        self.set_sidetone_level_cancellable(level, &|| false)
+    }
+
+    /// A stopped owner must not send Save after a blocked sidetone write returns.
+    pub fn set_sidetone_level_cancellable(&mut self, level: u8, is_cancelled: &dyn Fn() -> bool) -> Result<()> {
+        if is_cancelled() {
+            return Err(protocol_error("Sidetone write cancelled"));
+        }
         self.send_command(Nova7Gen2Command::Sidetone(level))?;
+        if is_cancelled() {
+            return Err(protocol_error("Sidetone save cancelled"));
+        }
         self.send_command(Nova7Gen2Command::Save)
     }
 
@@ -339,15 +350,33 @@ impl<T: Transport> Nova7Gen2<T> {
 
     /// Preserve interleaved power/wheel events for a single-owner service.
     /// The observer can abort on disconnect before any subsequent setting write.
-    pub fn sidetone_level_observed(&mut self, mut observe: impl FnMut(Report) -> Result<()>) -> Result<u8> {
+    pub fn sidetone_level_observed(&mut self, observe: impl FnMut(Report) -> Result<()>) -> Result<u8> {
+        self.sidetone_level_observed_cancellable(&|| false, observe)
+    }
+
+    pub fn sidetone_level_observed_cancellable(
+        &mut self,
+        is_cancelled: &dyn Fn() -> bool,
+        mut observe: impl FnMut(Report) -> Result<()>,
+    ) -> Result<u8> {
+        if is_cancelled() {
+            return Err(protocol_error("Sidetone readback cancelled"));
+        }
         self.send_command(Nova7Gen2Command::AudioSettings)?;
         let deadline = Instant::now() + Duration::from_millis(1000);
         for _ in 0..16 {
+            if is_cancelled() {
+                return Err(protocol_error("Sidetone readback cancelled"));
+            }
             let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
                 break;
             }
-            match self.read_event(remaining.as_millis().clamp(1, 1000) as i32)? {
+            let report = self.read_event(remaining.as_millis().clamp(1, 1000) as i32)?;
+            if is_cancelled() {
+                return Err(protocol_error("Sidetone readback cancelled"));
+            }
+            match report {
                 Some(Report::Sidetone(level)) => return Ok(level),
                 None => break,
                 Some(report) => observe(report)?,

@@ -26,6 +26,8 @@ struct Fake {
     fail_hid_on_next_snapshot: Option<Arc<AtomicBool>>,
     fail_hid_after_next_route: Option<Arc<AtomicBool>>,
     hid_failed: Arc<AtomicBool>,
+    volume_writes: u32,
+    fail_on_volume_write: Option<u32>,
 }
 impl Backend for Fake {
     fn snapshot(&mut self) -> Result<Snapshot, String> {
@@ -44,6 +46,12 @@ impl Backend for Fake {
         Ok(self.snapshot.clone())
     }
     fn set_stream(&mut self, id: u32, v: Option<f64>, m: Option<bool>, sink: Option<u32>) -> Result<(), String> {
+        if v.is_some() {
+            self.volume_writes += 1;
+            if self.fail_on_volume_write == Some(self.volume_writes) {
+                return Err("injected second volume write failure".into());
+            }
+        }
         let s = self.snapshot.streams.iter_mut().find(|s| s.id == id).unwrap();
         if let Some(v) = v {
             s.volume = v;
@@ -93,11 +101,47 @@ fn anonymous_streams_must_not_share_unrelated_app_assignment() {
         dir.path().join("state.json"),
     )
     .unwrap();
-    call(&mut s, "stream.set", json!({"id":1,"group":"game"}));
+    let response = s.request(json!({"method":"stream.set","params":{"id":1,"group":"game"}}));
+    assert!(
+        response.get("error").is_some(),
+        "an identity-less stream cannot be assigned durably: {response}"
+    );
     let state = call(&mut s, "state.get", json!({}));
+    assert_eq!(state["streams"][1]["group"], "unmanaged");
+}
+#[test]
+fn reused_anonymous_stream_id_cannot_inherit_old_saved_assignment() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("state.json");
+    let raw = json!([{"index":1,"sink":10,"mute":false,"volume":{"mono":{"value":65536}},"properties":{}}]);
+    let sinks = json!([{"index":10,"name":"sink","mute":false,"volume":{"mono":{"value":65536}}}]);
+    let snap = steelseries_gg::desktop::pulse::parse_snapshot(raw.clone(), sinks.clone()).unwrap();
+    let mut s = Service::new(
+        Fake {
+            snapshot: snap,
+            ..Default::default()
+        },
+        path.clone(),
+    )
+    .unwrap();
+    let response = s.request(json!({"method":"stream.set","params":{"id":1,"group":"game"}}));
+    assert!(
+        response.get("error").is_some(),
+        "anonymous assignments must not survive ID reuse: {response}"
+    );
+    drop(s);
+    let reused = steelseries_gg::desktop::pulse::parse_snapshot(raw, sinks).unwrap();
+    let mut next = Service::new(
+        Fake {
+            snapshot: reused,
+            ..Default::default()
+        },
+        path,
+    )
+    .unwrap();
     assert_eq!(
-        state["streams"][1]["group"], "unmanaged",
-        "anonymous unrelated sink-input inherited app 1 group"
+        call(&mut next, "state.get", json!({}))["streams"][0]["group"],
+        "unmanaged"
     );
 }
 #[test]
@@ -208,6 +252,58 @@ fn explicit_stream_route_must_recheck_offline_hid_owner_after_inventory() {
     s.backend.fail_hid_on_next_snapshot = Some(unplug);
     let _ = s.request(json!({"method":"stream.set","params":{"id":1,"sinkId":9}}));
     assert_eq!(s.backend.routes, 0, "offline owner still permitted explicit sink move");
+}
+#[test]
+fn already_offline_owner_cannot_be_bypassed_by_request_disarming_mixer() {
+    let dir = tempfile::tempdir().unwrap();
+    let unplug = Arc::new(AtomicBool::new(false));
+    let failed = Arc::new(AtomicBool::new(false));
+    let u = unplug.clone();
+    let f = failed.clone();
+    let owner = Controller::with_factory(move |_| {
+        Ok(Box::new(Hid {
+            unplug: u.clone(),
+            failed: f.clone(),
+        }))
+    });
+    let mut s = Service::with_hardware(
+        Fake {
+            snapshot: Snapshot {
+                streams: vec![stream(1, "game", 0.8)],
+                sinks: vec![Sink {
+                    id: 9,
+                    name: "other".into(),
+                    ..Default::default()
+                }],
+            },
+            ..Default::default()
+        },
+        dir.path().join("state.json"),
+        owner,
+    )
+    .unwrap();
+    call(
+        &mut s,
+        "device.set",
+        json!({"id":"1038:227e:test","hardwareEnabled":true}),
+    );
+    let until = Instant::now() + Duration::from_secs(2);
+    while call(&mut s, "state.get", json!({}))["physical"]["sample"].is_null() {
+        assert!(Instant::now() < until);
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    call(&mut s, "chatmix.set", json!({"inputMode":"hardware","enabled":true}));
+    unplug.store(true, Ordering::Release);
+    while !failed.load(Ordering::Acquire) {
+        assert!(Instant::now() < until);
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    let response = s.request(json!({"method":"stream.set","params":{"id":1,"sinkId":9}}));
+    assert!(
+        response.get("error").is_some(),
+        "disarming must not authorize this route: {response}"
+    );
+    assert_eq!(s.backend.routes, 0);
 }
 
 #[test]
@@ -323,11 +419,11 @@ fn profile_stops_between_routes_when_hid_disconnects_on_first_move() {
     }
     call(&mut s, "chatmix.set", json!({"inputMode":"hardware","enabled":true}));
     for id in [1, 2] {
-        call(&mut s, "stream.set", json!({"id":id,"group":"game","sinkId":9}));
+        call(&mut s, "stream.set", json!({"id":id,"group":"chat","sinkId":9}));
     }
     call(&mut s, "profiles.save", json!({"name":"Saved"}));
     for id in [1, 2] {
-        call(&mut s, "stream.set", json!({"id":id,"sinkId":10}));
+        call(&mut s, "stream.set", json!({"id":id,"group":"game","sinkId":10}));
     }
     let before = s.backend.routes;
     s.backend.fail_hid_after_next_route = Some(unplug);
@@ -339,4 +435,59 @@ fn profile_stops_between_routes_when_hid_disconnects_on_first_move() {
         "only the already-issued first move can complete"
     );
     assert_eq!(s.backend.snapshot.streams[1].sink_id, 10);
+    let state = call(&mut s, "state.get", json!({}));
+    assert_eq!(
+        state["streams"][0]["group"], "game",
+        "failed apply changed the in-memory policy"
+    );
+    assert_eq!(
+        state["streams"][1]["group"], "game",
+        "failed apply changed a later stream"
+    );
+    let routes = s.backend.routes;
+    s.tick().unwrap();
+    assert_eq!(
+        s.backend.routes, routes,
+        "failed apply must not replay saved route later"
+    );
+}
+
+#[test]
+fn failed_second_profile_gain_write_preserves_old_base_intent() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut s = Service::new(
+        Fake {
+            snapshot: Snapshot {
+                streams: vec![stream(1, "first", 0.8), stream(2, "second", 0.8)],
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+        dir.path().join("state.json"),
+    )
+    .unwrap();
+    for id in [1, 2] {
+        call(&mut s, "stream.set", json!({"id":id,"group":"game"}));
+    }
+    call(&mut s, "chatmix.set", json!({"enabled":true,"balance":0.5}));
+    call(&mut s, "profiles.save", json!({"name":"Attenuated"}));
+    call(&mut s, "chatmix.set", json!({"enabled":false}));
+    assert_eq!(s.backend.snapshot.streams[0].effective_volume, 0.8);
+    s.backend.fail_on_volume_write = Some(s.backend.volume_writes + 2);
+    let response = s.request(json!({"method":"profiles.apply","params":{"name":"Attenuated"}}));
+    assert!(response.get("error").is_some(), "expected partial failure: {response}");
+    assert_eq!(
+        s.backend.snapshot.streams[0].effective_volume, 0.4,
+        "first write really happened"
+    );
+    let state = call(&mut s, "state.get", json!({}));
+    assert_eq!(
+        state["streams"][0]["volume"], 0.8,
+        "a partial profile write was mistaken for an external base edit"
+    );
+    assert_eq!(state["mixer"]["enabled"], false, "failed profile must be disarmed");
+    assert_eq!(
+        s.backend.snapshot.streams[1].effective_volume, 0.8,
+        "second write must not happen"
+    );
 }

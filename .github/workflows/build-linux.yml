@@ -47,7 +47,7 @@ jobs:
       - name: Unit and native safety gates
         run: |
           cargo test --locked --lib desktop::hardware::tests
-          cargo test --locked --test nova7_gen2 --test desktop_hardware --test desktop_review --test desktop_lighting
+          cargo test --locked --test nova7_gen2 --test desktop_hardware --test desktop_review --test desktop_lighting --test audit_core --test audit_hardware
           cargo clippy --all-targets --locked -- -D warnings
           cd desktop
           npm run typecheck

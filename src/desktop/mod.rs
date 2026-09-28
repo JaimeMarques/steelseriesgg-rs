@@ -262,6 +262,15 @@ impl<B: Backend> Service<B> {
             service.assignments = stored.current.assignments;
             service.profiles = stored.profiles;
             service.applied = stored.applied;
+            // Pulse reuses numeric sink-input IDs. Identity-less streams have no
+            // stable app identity and must not inherit a prior stream's policy.
+            service.assignments.retain(|key, _| !key.starts_with("anonymous:"));
+            service
+                .applied
+                .retain(|_, applied| !applied.key.starts_with("anonymous:"));
+            for profile in service.profiles.values_mut() {
+                profile.assignments.retain(|key, _| !key.starts_with("anonymous:"));
+            }
         }
         // Resuming a GUI or service must never automatically enable attenuation.
         service.mixer.enabled = false;
@@ -368,12 +377,23 @@ impl<B: Backend> Service<B> {
     }
     pub fn request(&mut self, request: Value) -> Value {
         self.backend.begin_cycle();
+        // Preserve the write policy that was in force when this request arrived.
+        // sync_hardware disarms an offline mixer, but cannot turn this same
+        // request into an unguarded stream mutation.
+        let hardware_mix_before_sync = self.mixer.enabled && self.mixer.input_mode == hardware::InputMode::Hardware;
         self.sync_hardware();
         let id = request.get("id").cloned().unwrap_or(Value::Null);
-        let result = match request["method"].as_str() {
-            Some(method) => self.dispatch(method, request.get("params").cloned().unwrap_or(json!({}))),
-            None => Err(RpcError::new("INVALID_REQUEST", "method must be a string")),
-        };
+        let result =
+            if hardware_mix_before_sync && request["method"] == "stream.set" && !self.hardware.audio_write_guard()() {
+                Err(RpcError::backend(
+                    "Physical headset unavailable; audio write cancelled".into(),
+                ))
+            } else {
+                match request["method"].as_str() {
+                    Some(method) => self.dispatch(method, request.get("params").cloned().unwrap_or(json!({}))),
+                    None => Err(RpcError::new("INVALID_REQUEST", "method must be a string")),
+                }
+            };
         match result {
             Ok(result) => json!({"id":id,"result":result}),
             Err(e) => json!({"id":id,"error":{"code":e.code,"message":e.message}}),
@@ -603,6 +623,12 @@ impl<B: Backend> Service<B> {
                     .find(|s| s.id == p.id)
                     .ok_or_else(|| RpcError::new("NOT_FOUND", "stream disappeared"))?
                     .clone();
+                if stream.app_key.starts_with("anonymous:") {
+                    return Err(RpcError::new(
+                        "UNSUPPORTED",
+                        "This stream has no stable application identity; persistent assignment would affect an unrelated stream when its ID is reused",
+                    ));
+                }
                 let sink = match p.sink_id {
                     Some(id) => Some(
                         self.snapshot
@@ -824,15 +850,11 @@ impl<B: Backend> Service<B> {
                             "Physical headset unavailable; audio write cancelled".into(),
                         ));
                     }
-                    self.groups = profile.groups;
-                    self.mixer = profile.mixer;
-                    self.assignments = profile.assignments;
-                    for stream in &mut self.snapshot.streams {
-                        stream.group = "unmanaged".into();
-                        if let Some(a) = self.assignments.get(&stream.app_key) {
-                            stream.group = a.group.clone();
-                            stream.volume = a.volume;
-                            stream.muted = a.muted;
+                    // Complete the guarded routes before publishing the new policy.
+                    // If a later route fails, already-issued commands cannot be
+                    // undone, but the service must not commit a half-applied profile.
+                    for stream in &self.snapshot.streams {
+                        if let Some(a) = profile.assignments.get(&stream.app_key) {
                             if let Some(name) = &a.sink {
                                 if let Some(sink) = self.snapshot.sinks.iter().find(|s| &s.name == name) {
                                     self.backend
@@ -844,8 +866,36 @@ impl<B: Backend> Service<B> {
                             }
                         }
                     }
-                    self.apply(None)?;
-                    self.persist()?;
+                    let previous = self.profile();
+                    let previous_streams = self.snapshot.streams.clone();
+                    self.groups = profile.groups;
+                    self.mixer = profile.mixer;
+                    self.assignments = profile.assignments;
+                    for stream in &mut self.snapshot.streams {
+                        stream.group = "unmanaged".into();
+                        if let Some(a) = self.assignments.get(&stream.app_key) {
+                            stream.group = a.group.clone();
+                            stream.volume = a.volume;
+                            stream.muted = a.muted;
+                        }
+                    }
+                    let result = self.apply(None).and_then(|_| self.persist());
+                    if let Err(error) = result {
+                        self.groups = previous.groups;
+                        self.mixer = previous.mixer;
+                        self.assignments = previous.assignments;
+                        self.snapshot.streams = previous_streams;
+                        // A command may have changed native audio before a later
+                        // command failed. Old expected gains would misclassify it
+                        // as an external edit and overwrite the saved base intent.
+                        // Leave actual native readback visible, but require a new
+                        // explicit activation before any further policy writes.
+                        self.applied.clear();
+                        self.armed = false;
+                        self.mixer.enabled = false;
+                        self.sync_hardware();
+                        return Err(error);
+                    }
                     Ok(self.state())
                 }
             }

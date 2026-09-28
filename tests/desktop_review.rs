@@ -145,7 +145,7 @@ fn one_observed_external_edit_updates_default_but_conflicting_edits_do_not() {
 
 #[test]
 fn native_amplification_is_visible_and_setting_unity_writes() {
-    let inputs = json!([{"index":1,"sink":11,"mute":false,"volume":{"mono":{"value":98304}},"properties":{}}]);
+    let inputs = json!([{"index":1,"sink":11,"mute":false,"volume":{"mono":{"value":98304}},"properties":{"application.name":"Amplified Test Player"}}]);
     let sinks = json!([{"index":11,"name":"test","mute":false,"volume":{"mono":{"value":98304}}}]);
     let snapshot = steelseries_gg::desktop::pulse::parse_snapshot(inputs, sinks).unwrap();
     assert_eq!(snapshot.streams[0].effective_volume, 1.5);

@@ -30,6 +30,13 @@ struct GateTransport {
     wire: Arc<Mutex<Wire>>,
     entered: Arc<AtomicBool>,
     release: Arc<AtomicBool>,
+    block_on: u8,
+    exited: Arc<AtomicBool>,
+}
+impl Drop for GateTransport {
+    fn drop(&mut self) {
+        self.exited.store(true, Ordering::Release);
+    }
 }
 impl Transport for GateTransport {
     fn write(&mut self, data: &[u8]) -> steelseries_gg::Result<usize> {
@@ -42,7 +49,7 @@ impl Transport for GateTransport {
                 _ => {}
             }
         }
-        if data[1] == 0x39 {
+        if data[1] == self.block_on {
             self.entered.store(true, Ordering::Release);
             let until = Instant::now() + Duration::from_secs(2);
             while !self.release.load(Ordering::Acquire) && Instant::now() < until {
@@ -62,7 +69,6 @@ impl Transport for GateTransport {
     }
 }
 #[test]
-#[ignore = "RED regression: Nova7Gen2::set_sidetone_level sends Save internally; requires driver-module change outside this task's file ownership"]
 fn cancelled_owner_does_not_issue_sidetone_save_or_readback() {
     let wire = Arc::new(Mutex::new(Wire::default()));
     let entered = Arc::new(AtomicBool::new(false));
@@ -88,6 +94,8 @@ fn cancelled_owner_does_not_issue_sidetone_save_or_readback() {
                     wire: w.clone(),
                     entered: e.clone(),
                     release: r.clone(),
+                    block_on: 0x39,
+                    exited: Arc::new(AtomicBool::new(false)),
                 },
             )
             .unwrap(),
@@ -122,6 +130,83 @@ fn cancelled_owner_does_not_issue_sidetone_save_or_readback() {
         !writes.iter().any(|w| matches!(w.get(1), Some(0x09 | 0x20 | 0x37))),
         "commands after stop: {writes:?}"
     );
+}
+
+#[test]
+fn cancelled_owner_does_not_complete_blocked_sidetone_readback() {
+    let wire = Arc::new(Mutex::new(Wire::default()));
+    let entered = Arc::new(AtomicBool::new(false));
+    let release = Arc::new(AtomicBool::new(false));
+    let exited = Arc::new(AtomicBool::new(false));
+    let done = exited.clone();
+    let (w, e, r) = (wire.clone(), entered.clone(), release.clone());
+    let mut owner = HardwareController::with_factory(move |_| {
+        let info = DeviceInfo {
+            name: "fixture".into(),
+            device_type: DeviceType::Headset,
+            vendor_id: 0x1038,
+            product_id: 0x227e,
+            interface_number: 3,
+            usage_page: 0xffc0,
+            usage: 1,
+            serial_number: Some("fixture".into()),
+            manufacturer: None,
+            path: "injected".into(),
+        };
+        Ok(Box::new(
+            Nova7Gen2::new(
+                info,
+                GateTransport {
+                    wire: w.clone(),
+                    entered: e.clone(),
+                    release: r.clone(),
+                    block_on: 0x20,
+                    exited: done.clone(),
+                },
+            )
+            .unwrap(),
+        ))
+    });
+    owner.enable("1038:227e:fixture").unwrap();
+    let until = Instant::now() + Duration::from_secs(2);
+    while owner.snapshot().sample.is_none() {
+        assert!(Instant::now() < until);
+        thread::sleep(Duration::from_millis(2));
+    }
+    owner
+        .queue(
+            "1038:227e:fixture",
+            SettingsCommand {
+                sidetone: Some(2),
+                auto_off_minutes: Some(30),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    while !entered.load(Ordering::Acquire) {
+        assert!(Instant::now() < until);
+        thread::sleep(Duration::from_millis(2));
+    }
+    owner.stop();
+    release.store(true, Ordering::Release);
+    while !exited.load(Ordering::Acquire) {
+        assert!(Instant::now() < until);
+        thread::sleep(Duration::from_millis(1));
+    }
+    assert_ne!(
+        owner.snapshot().last_command.as_deref(),
+        Some("completed"),
+        "cancelled readback reported success"
+    );
+    assert_eq!(owner.snapshot().sidetone, None, "cancelled readback was accepted");
+    drop(owner);
+    let writes = &wire.lock().unwrap().writes;
+    assert!(
+        !writes.iter().any(|w| w.get(1) == Some(&0x37)),
+        "auto-off after stop: {writes:?}"
+    );
+    // The readback reply is buffered, but must not be committed as success.
+    assert_eq!(writes.iter().filter(|w| w.get(1) == Some(&0x20)).count(), 1);
 }
 
 struct BlockingInventory {

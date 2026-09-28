@@ -81,6 +81,17 @@ pub trait HardwareDevice: Send {
         self.request_status()
     }
     fn set_sidetone(&mut self, level: u8, observe: &mut dyn FnMut(Report) -> crate::Result<()>) -> crate::Result<u8>;
+    fn set_sidetone_cancellable(
+        &mut self,
+        level: u8,
+        observe: &mut dyn FnMut(Report) -> crate::Result<()>,
+        is_cancelled: &dyn Fn() -> bool,
+    ) -> crate::Result<u8> {
+        if is_cancelled() {
+            return Err(crate::Error::DeviceCommunication("Sidetone cancelled".into()));
+        }
+        self.set_sidetone(level, observe)
+    }
     fn set_auto_off(&mut self, minutes: u8) -> crate::Result<()>;
 }
 impl<T: Transport> HardwareDevice for Nova7Gen2<T> {
@@ -96,6 +107,18 @@ impl<T: Transport> HardwareDevice for Nova7Gen2<T> {
     fn set_sidetone(&mut self, level: u8, observe: &mut dyn FnMut(Report) -> crate::Result<()>) -> crate::Result<u8> {
         self.set_sidetone_level(level)?;
         self.sidetone_level_observed(observe)
+    }
+    fn set_sidetone_cancellable(
+        &mut self,
+        level: u8,
+        observe: &mut dyn FnMut(Report) -> crate::Result<()>,
+        is_cancelled: &dyn Fn() -> bool,
+    ) -> crate::Result<u8> {
+        self.set_sidetone_level_cancellable(level, is_cancelled)?;
+        if is_cancelled() {
+            return Err(crate::Error::DeviceCommunication("Sidetone readback cancelled".into()));
+        }
+        self.sidetone_level_observed_cancellable(is_cancelled, observe)
     }
     fn set_auto_off(&mut self, minutes: u8) -> crate::Result<()> {
         Headset::set_auto_off(self, minutes)
@@ -255,9 +278,11 @@ impl Controller {
                         }
                         if let Some(level) = command.sidetone {
                             let actual = device
-                                .set_sidetone(level, &mut |report| {
-                                    accept(&shared, report).map_err(crate::Error::DeviceCommunication)
-                                })
+                                .set_sidetone_cancellable(
+                                    level,
+                                    &mut |report| accept(&shared, report).map_err(crate::Error::DeviceCommunication),
+                                    &is_cancelled,
+                                )
                                 .map_err(|e| e.to_string())?;
                             shared.lock().state.sidetone = Some(actual);
                             if actual != level {
