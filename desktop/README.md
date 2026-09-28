@@ -4,7 +4,7 @@ Developer guide for the Electron + React + TypeScript console. For ordinary use,
 
 ## Build and launch locally
 
-Prerequisites: Linux, Node/npm, the repository's Rust toolchain and native build dependencies, a running PipeWire-Pulse or PulseAudio session, and **pactl** (`pulseaudio-utils` on Debian/Ubuntu; `libpulse` on Arch). Electron needs the usual GTK/NSS/GBM libraries and a working Chromium sandbox. `xvfb` is only needed for headless smoke tests.
+Prerequisites: Linux, Node/npm, the repository's Rust toolchain and native build dependencies, a running PipeWire-Pulse or PulseAudio session, and **pactl** (`pulseaudio-utils` on Debian/Ubuntu; `libpulse` on Arch) for the default legacy mixer. The opt-in native backend requires PipeWire, `libpipewire-0.3-dev`, `libspa-0.2-dev`, libclang during compilation and `libpipewire-0.3-0t64` at runtime on Ubuntu 24.04. Electron needs the usual GTK/NSS/GBM libraries and a working Chromium sandbox. `xvfb` is only needed for headless smoke tests.
 
 ```sh
 cd desktop
@@ -26,7 +26,7 @@ The build stages a mode-755 binary under the private, ignored `local-bin/` direc
 
 ## Build Ubuntu packages
 
-Build on Ubuntu 24.04 amd64 for the compatibility baseline. The desktop binary has no compile-time PulseAudio dependency; install build tools (`build-essential`, `pkg-config`, `unzip`, `binutils`, `apparmor`, `desktop-file-utils`) and the pinned Rust toolchain. Native optional audio-feature tests also require `libpulse-dev`. Headless GUI tests need `xvfb`, `xauth`, `x11-utils` and `dbus-x11`.
+Build on Ubuntu 24.04 amd64 for the compatibility baseline. Install build tools (`build-essential`, `pkg-config`, `libpipewire-0.3-dev`, `libspa-0.2-dev`, `libclang-dev`, `clang`, `unzip`, `binutils`, `apparmor`, `desktop-file-utils`) and the pinned Rust toolchain. Optional PulseAudio-feature tests also require `libpulse-dev`. Headless GUI tests need `xvfb`, `xauth`, `x11-utils` and `dbus-x11`.
 
 ```sh
 cd desktop
@@ -38,7 +38,7 @@ npm run test:packaging
 
 Packaging compiles Rust for generic `x86-64`, overriding inherited developer CPU tuning, and always extracts the checksum-verified official Electron archive, never a development `node_modules/electron/dist` tree. A custom `--sidecar` must already be built for the intended CPU baseline; ELF architecture/GLIBC checks alone cannot certify every instruction in an externally supplied binary. It checks ELF architecture/GLIBC requirements, rejects shipped symlinks, and validates the desktop entry and AppArmor syntax. The standalone output is `release/app`; unprivileged extraction cannot establish the root ownership of the DEB's sandbox helper.
 
-The Ubuntu CI job installs the DEB on a disposable runner, launches the actual packaged binary in a private session without a helper override, and purges it while checking that user data survives. Archive inspection and local extraction tests alone do not certify fresh installation, Wayland/GNOME Shell behavior or hardware access.
+The Ubuntu CI job runs both legacy and opt-in native backends against separate private PipeWire cores, checks the native ELF dependency and DEB runtime dependency, installs the DEB on a disposable runner, launches the actual packaged binary in a private session without a helper override, and purges it while checking that user data survives. Archive inspection and local extraction tests alone do not certify fresh installation, Wayland/GNOME Shell behavior or hardware access.
 
 Snap builds consume the same standalone tree; see the [Snap guide](../snap/README.md). Strict confinement's HID, browser-sandbox and cross-app audio limitations are release gates, not errors to bypass.
 
@@ -83,6 +83,11 @@ The tray preference is local desktop state. “Keep running in the tray” hides
 ## Tests
 
 ```sh
+PYTHONPATH=tests python3 -m unittest tests/test_desktop_pipewire_config.py
+node --test tests/native-packaging.test.mjs
+# Only after building the integrated --audio-backend pipewire sidecar; this
+# starts owned private daemons/null sinks and NEVER writes to host audio:
+python3 tests/desktop_pipewire_isolated.py
 npm test
 npm run typecheck
 npm run smoke

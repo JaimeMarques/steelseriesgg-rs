@@ -17,7 +17,7 @@ The Nova 7 Gen 2 reports independent gains: the center is A 100% / B 100%, not h
 
 ### Applications and browser tabs
 
-SSGG controls streams exposed by PulseAudio/PipeWire-Pulse. It cannot split browser tabs that Chrome has already combined into one native stream. Start playback and use Refresh if a program is missing. Application names come from native metadata; unknown identities are not guessed.
+The default backend controls PulseAudio/PipeWire-Pulse streams. A separate opt-in `ssgg-desktop --audio-backend pipewire` backend uses native PipeWire nodes/metadata; its private-core acceptance is a separate gate and is not evidence of installed Snap mixer authority. It cannot split browser tabs Chrome has already combined into one stream. Start playback and use Refresh if a program is missing. Application names come from stream metadata; unknown identities are not guessed.
 
 Output selection moves the selected application stream. SSGG does not create Sonar-style virtual devices or DSP buses.
 
