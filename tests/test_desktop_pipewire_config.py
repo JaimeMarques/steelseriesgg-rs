@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from desktop_pipewire_isolated import private_environment, node_props, stream_nodes
+from desktop_pipewire_isolated import private_environment, node_props, stream_nodes, native_effective_volume, linked_sink_name
 
 
 class NativeFixtureTests(unittest.TestCase):
@@ -25,6 +25,16 @@ class NativeFixtureTests(unittest.TestCase):
                 self.assertTrue(env[key].startswith(directory + "/"), key)
             self.assertNotIn("PIPEWIRE_CONFIG_PREFIX", env)
             self.assertNotIn("PIPEWIRE_CONFIG_NAME", env)
+
+    def test_cubic_native_gain_and_link_readback_ignore_stale_node_target(self):
+        self.assertAlmostEqual(native_effective_volume({"volume": 1.0, "channelVolumes": [0.125, 0.125]}), 0.5)
+        self.assertAlmostEqual(native_effective_volume({"volume": 1.5, "channelVolumes": [0.5, 0.5]}), 0.75 ** (1/3))
+        objects = [
+            {"id": 23, "type": "PipeWire:Interface:Node", "info": {"props": {"media.class": "Stream/Output/Audio", "target.object": "test_a"}}},
+            {"id": 31, "type": "PipeWire:Interface:Node", "info": {"props": {"media.class": "Audio/Sink", "node.name": "test_b"}}},
+            {"id": 40, "type": "PipeWire:Interface:Link", "info": {"output-node-id": 23, "input-node-id": 31, "state": "active"}},
+        ]
+        self.assertEqual(linked_sink_name(objects, 23), "test_b")
 
     def test_stream_nodes_filter_media_class_and_read_native_props(self):
         dump = [

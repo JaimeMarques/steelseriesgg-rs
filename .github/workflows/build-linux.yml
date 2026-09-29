@@ -91,6 +91,12 @@ jobs:
           for package in "$PWD"/desktop/release/*.deb; do
             node desktop/scripts/verify-deb.mjs "$package" --runtime
           done
+      - name: Exercise the installed native sidecar on a private PipeWire core
+        env:
+          SSGG_DESKTOP_BIN: /opt/ssgg/resources/ssgg-desktop
+          SSGG_PACTL: /usr/bin/pactl
+          SSGG_PACAT: /usr/bin/pacat
+        run: PYTHONPATH=tests python3 tests/desktop_pipewire_isolated.py
       - name: Exercise the installed launcher without sandbox exceptions
         working-directory: desktop
         run: |

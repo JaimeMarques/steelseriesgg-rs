@@ -43,6 +43,7 @@ pub fn parse_snapshot(inputs: Value, sinks: Value) -> Result<Snapshot, String> {
             Ok(Stream {
                 id,
                 app_key,
+                generation: None,
                 app_name,
                 name: text(&props["media.name"]),
                 volume,

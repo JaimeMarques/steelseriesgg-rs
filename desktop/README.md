@@ -38,7 +38,7 @@ npm run test:packaging
 
 Packaging compiles Rust for generic `x86-64`, overriding inherited developer CPU tuning, and always extracts the checksum-verified official Electron archive, never a development `node_modules/electron/dist` tree. A custom `--sidecar` must already be built for the intended CPU baseline; ELF architecture/GLIBC checks alone cannot certify every instruction in an externally supplied binary. It checks ELF architecture/GLIBC requirements, rejects shipped symlinks, and validates the desktop entry and AppArmor syntax. The standalone output is `release/app`; unprivileged extraction cannot establish the root ownership of the DEB's sandbox helper.
 
-The Ubuntu CI job runs both legacy and opt-in native backends against separate private PipeWire cores, checks the native ELF dependency and DEB runtime dependency, installs the DEB on a disposable runner, launches the actual packaged binary in a private session without a helper override, and purges it while checking that user data survives. Archive inspection and local extraction tests alone do not certify fresh installation, Wayland/GNOME Shell behavior or hardware access.
+The Ubuntu CI job runs both legacy and opt-in native backends against separate private PipeWire cores, checks the native ELF dependency and DEB runtime dependency, installs the DEB on a disposable runner, runs the installed native sidecar against a private core, launches the actual packaged binary in a private session without a helper override, and purges it while checking that user data survives. Archive inspection and local extraction tests alone do not certify fresh installation, Wayland/GNOME Shell behavior or hardware access.
 
 Snap builds consume the same standalone tree; see the [Snap guide](../snap/README.md). Strict confinement's HID, browser-sandbox and cross-app audio limitations are release gates, not errors to bypass.
 
@@ -48,7 +48,9 @@ To keep mixing when the GUI quits, start the standalone Rust service **before** 
 
 ```sh
 # In its own terminal; no installer or systemd changes:
-./local-bin/ssgg-desktop
+./local-bin/ssgg-desktop                              # Pulse-compatible default
+# Or use native PipeWire explicitly (do not run both services):
+./local-bin/ssgg-desktop --audio-backend pipewire
 # Then, in another terminal:
 npm run launch
 ```

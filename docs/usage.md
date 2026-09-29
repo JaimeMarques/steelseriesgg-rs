@@ -17,7 +17,14 @@ The Nova 7 Gen 2 reports independent gains: the center is A 100% / B 100%, not h
 
 ### Applications and browser tabs
 
-The default backend controls PulseAudio/PipeWire-Pulse streams. A separate opt-in `ssgg-desktop --audio-backend pipewire` backend uses native PipeWire nodes/metadata; its private-core acceptance is a separate gate and is not evidence of installed Snap mixer authority. It cannot split browser tabs Chrome has already combined into one stream. Start playback and use Refresh if a program is missing. Application names come from stream metadata; unknown identities are not guessed.
+The default backend controls PulseAudio/PipeWire-Pulse streams. To opt in to native PipeWire after installing the Ubuntu `.deb`, start the packaged sidecar **as your desktop user** before opening the GUI:
+
+```sh
+/opt/ssgg/resources/ssgg-desktop --audio-backend pipewire
+# Then open SSGG from the launcher; it attaches to this independent service.
+```
+
+Stop any SSGG desktop service you own before switching backends; never run two mixers against the same applications. The native service uses PipeWire nodes/metadata and does not silently fall back to Pulse. Private-core acceptance does not prove installed strict-Snap mixer authority. Neither backend can split browser tabs Chrome has already combined into one stream. Start playback and use Refresh if a program is missing. Application names come from stream metadata; unknown identities are not guessed.
 
 Output selection moves the selected application stream. SSGG does not create Sonar-style virtual devices or DSP buses.
 

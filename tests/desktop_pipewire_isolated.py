@@ -6,6 +6,7 @@ The Pulse protocol is used ONLY by pacat/pactl to create and identify the fixtur
 All service mutations and assertions use native PipeWire nodes/metadata.
 """
 import json
+import math
 import os
 from pathlib import Path
 import select
@@ -13,7 +14,7 @@ import subprocess
 import tempfile
 import time
 
-from desktop_isolated import CORE, PULSE, wireplumber_policy_command
+from desktop_isolated import PULSE, private_core_config, wireplumber_policy_command
 
 
 def private_environment(root: Path) -> dict[str, str]:
@@ -44,6 +45,28 @@ def node_props(node: dict) -> dict:
     assert "volume" in params[0] and "mute" in params[0], f"Native gain/mute missing: {node}"
     return params[0]
 
+def native_effective_volume(props: dict) -> float:
+    channels = props.get("channelVolumes")
+    scalar = props.get("volume")
+    assert isinstance(channels, list) and channels and isinstance(scalar, (int, float)), props
+    assert math.isfinite(float(scalar)) and scalar >= 0 and all(
+        isinstance(v, (int, float)) and math.isfinite(float(v)) and v >= 0 for v in channels
+    ), props
+    return (float(scalar) * sum(float(v) for v in channels) / len(channels)) ** (1 / 3)
+
+def linked_sink_name(objects: list[dict], stream_id: int) -> str:
+    linked_ids = {obj.get("info", {}).get("input-node-id") for obj in objects
+                  if obj.get("type") == "PipeWire:Interface:Link"
+                  and obj.get("info", {}).get("output-node-id") == stream_id
+                  and obj.get("info", {}).get("state", "").lower() in ("active", "paused")}
+    assert len(linked_ids) == 1, f"Stream {stream_id} has no unique active sink link: {linked_ids}"
+    target = next(iter(linked_ids))
+    sinks = [obj.get("info", {}).get("props", {}) for obj in objects
+             if obj.get("type") == "PipeWire:Interface:Node" and obj.get("id") == target
+             and obj.get("info", {}).get("props", {}).get("media.class") == "Audio/Sink"]
+    assert len(sinks) == 1 and sinks[0].get("node.name"), f"Stream {stream_id} linked to missing sink"
+    return sinks[0]["node.name"]
+
 
 def run():
     # Fail before spawning anything if session policy is not audited.
@@ -59,7 +82,7 @@ def run():
         env = private_environment(root)
         for name in ("home", "config", "state", "cache", "data", "pulse"):
             (root / name).mkdir(mode=0o700)
-        (root / "core.conf").write_text(CORE)
+        (root / "core.conf").write_text(private_core_config(policy))
         (root / "pulse.conf").write_text(PULSE)
         # The private client uses only its explicit native socket; no host config.
         (root / "client.conf").write_text('''context.properties = { support.dbus = false }
@@ -110,11 +133,11 @@ context.modules = [
         def assert_native(expected_volume, expected_mute=None, expected_sink=None):
             node = native_stream()
             props = node_props(node)
-            assert abs(float(props["volume"]) - expected_volume) < 0.025, (props, expected_volume)
+            assert abs(native_effective_volume(props) - expected_volume) < 0.025, (props, expected_volume)
             if expected_mute is not None:
                 assert props["mute"] is expected_mute, props
             if expected_sink is not None:
-                assert node["info"]["props"].get("target.object") == expected_sink, node
+                assert linked_sink_name(dump(), node["id"]) == expected_sink, node
             return node
 
         sidecar = None
@@ -142,7 +165,7 @@ context.modules = [
                  "policy-linked pacat playback")
             if fixture_only:
                 assert_native(1.0, False, "test_a")
-                command("pw-cli", "set-param", str(native_stream()["id"]), "Props", "{ volume: 1.5 }")
+                command("pw-cli", "set-param", str(native_stream()["id"]), "Props", "{ channelVolumes: [3.375, 3.375] }")
                 wait(lambda: assert_native(1.5), "native fixture 150% readback")
                 print(json.dumps({"result": "fixture-only", "backend_tested": False, "host_audio_mutated": False}))
                 return
@@ -167,7 +190,10 @@ context.modules = [
                 if expect_error:
                     assert "error" in response, f"Fail-closed expected, got: {response}"
                     return response["error"]
-                assert "error" not in response, response
+                if "error" in response:
+                    details = {"metadata": command("pw-metadata", "-n", "default"),
+                               "links": [obj.get("info") for obj in dump() if obj.get("type") == "PipeWire:Interface:Link"]}
+                    raise AssertionError(f"native RPC error {response}; private graph: {details}")
                 return response["result"]
 
             state = rpc("state.get")
@@ -181,8 +207,8 @@ context.modules = [
             sink_b = next(s["id"] for s in state["sinks"] if s["name"] == "test_b")
             assert_native(1.0, False, "test_a")
             # External fixture adjustment uses native Props, never the service's Pulse shim.
-            command("pw-cli", "set-param", str(stream["id"]), "Props", "{ volume: 1.5 }")
-            wait(lambda: abs(float(node_props(native_stream())["volume"]) - 1.5) < 0.025, "native external 150%")
+            command("pw-cli", "set-param", str(stream["id"]), "Props", "{ channelVolumes: [3.375, 3.375] }")
+            wait(lambda: assert_native(1.5), "native external 150%")
             rpc("stream.set", {"id": stream["id"], "group": "game"})
             rpc("chatmix.set", {"enabled": True, "balance": 0.5})
             wait(lambda: assert_native(0.75), "150% base attenuated to 75%")
@@ -217,8 +243,11 @@ context.modules = [
             core.terminate()
             core.wait(timeout=4)
             try:
-                error = rpc("state.get", expect_error=True)
-                assert error, error
+                disconnected = rpc("state.get")
+                assert disconnected["backend"]["connected"] is False, disconnected
+                assert disconnected["streams"] == [] and disconnected["sinks"] == [], disconnected
+                assert disconnected["mixer"]["enabled"] is False, disconnected
+                assert disconnected["backend"]["name"] == "Native PipeWire", disconnected
             except (BrokenPipeError, AssertionError) as error:
                 assert sidecar.poll() is not None, f"Unexpected sidecar response after core death: {error}"
             print(json.dumps({"result": "passed", "backend": "native PipeWire private core", "host_audio_mutated": False,

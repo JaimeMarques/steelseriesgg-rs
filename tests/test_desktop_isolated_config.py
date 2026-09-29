@@ -3,13 +3,18 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from desktop_isolated import CORE, wireplumber_policy_command
+from desktop_isolated import CORE, private_core_config, wireplumber_policy_command
 
 
 class PolicySelectionTests(unittest.TestCase):
     def test_private_core_supplies_default_metadata_for_legacy_sink_moves(self):
         self.assertIn("{ factory = metadata args = { metadata.name = default } }", CORE)
         self.assertEqual(CORE.count("metadata.name = default"), 1)
+
+    def test_private_core_metadata_has_one_owner_for_each_policy_version(self):
+        marker = "{ factory = metadata args = { metadata.name = default } }"
+        self.assertEqual(private_core_config(["wireplumber", "-c", "/audited/policy.conf"]).count(marker), 1)
+        self.assertNotIn(marker, private_core_config(["wireplumber", "--profile=policy"]))
 
     def test_modern_policy_inherits_base_without_hardware(self):
         with tempfile.TemporaryDirectory() as root:

@@ -79,6 +79,100 @@ impl Backend for Fake {
         Ok(())
     }
 }
+struct OwnedGuardBackend(Fake);
+impl Backend for OwnedGuardBackend {
+    fn snapshot(&mut self) -> Result<Snapshot, String> {
+        self.0.snapshot()
+    }
+    fn set_stream(&mut self, id: u32, v: Option<f64>, m: Option<bool>, sink: Option<u32>) -> Result<(), String> {
+        self.0.set_stream(id, v, m, sink)
+    }
+    fn set_stream_guarded(
+        &mut self,
+        _: u32,
+        _: Option<f64>,
+        _: Option<bool>,
+        _: Option<u32>,
+        _: &dyn Fn() -> bool,
+    ) -> Result<(), String> {
+        panic!("Service dropped an owned audio guard before a backend route command")
+    }
+    fn set_stream_guarded_owned(
+        &mut self,
+        id: u32,
+        v: Option<f64>,
+        m: Option<bool>,
+        sink: Option<u32>,
+        allowed: Arc<dyn Fn() -> bool + Send + Sync>,
+    ) -> Result<(), String> {
+        if !allowed() {
+            return Err("guard rejected native queued write".into());
+        }
+        self.0.set_stream(id, v, m, sink)
+    }
+}
+#[test]
+fn explicit_route_passes_owned_guard_to_async_capable_backend() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut s = Service::new(
+        OwnedGuardBackend(Fake {
+            snapshot: Snapshot {
+                streams: vec![stream(1, "game", 0.8)],
+                sinks: vec![Sink {
+                    id: 9,
+                    name: "other".into(),
+                    ..Default::default()
+                }],
+            },
+            ..Default::default()
+        }),
+        dir.path().join("state.json"),
+    )
+    .unwrap();
+    let response = s.request(json!({"method":"stream.set","params":{"id":1,"sinkId":9}}));
+    assert!(response.get("error").is_none(), "{response}");
+    assert_eq!(s.backend.0.routes, 1);
+}
+
+#[test]
+fn saved_profile_route_passes_owned_guard_to_async_capable_backend() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut initial = stream(1, "game", 0.8);
+    initial.sink_id = 10;
+    let mut s = Service::new(
+        OwnedGuardBackend(Fake {
+            snapshot: Snapshot {
+                streams: vec![initial],
+                sinks: vec![
+                    Sink {
+                        id: 9,
+                        name: "saved".into(),
+                        ..Default::default()
+                    },
+                    Sink {
+                        id: 10,
+                        name: "current".into(),
+                        ..Default::default()
+                    },
+                ],
+            },
+            ..Default::default()
+        }),
+        dir.path().join("state.json"),
+    )
+    .unwrap();
+    for (method, params) in [
+        ("stream.set", json!({"id":1,"sinkId":9})),
+        ("profiles.save", json!({"name":"Saved"})),
+        ("stream.set", json!({"id":1,"sinkId":10})),
+        ("profiles.apply", json!({"name":"Saved"})),
+    ] {
+        let response = s.request(json!({"method":method,"params":params}));
+        assert!(response.get("error").is_none(), "{response}");
+    }
+    assert_eq!(s.backend.0.snapshot.streams[0].sink_id, 9);
+}
+
 fn call(s: &mut Service<Fake>, method: &str, params: Value) -> Value {
     let r = s.request(json!({"id":1,"method":method,"params":params}));
     assert!(r.get("error").is_none(), "{r}");
@@ -144,6 +238,39 @@ fn reused_anonymous_stream_id_cannot_inherit_old_saved_assignment() {
         "unmanaged"
     );
 }
+#[test]
+fn reused_native_node_id_and_app_key_preserve_saved_base_across_generation() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut first = stream(1, "game", 0.8);
+    first.generation = Some("serial-100".into());
+    let mut s = Service::new(
+        Fake {
+            snapshot: Snapshot {
+                streams: vec![first],
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+        dir.path().join("state.json"),
+    )
+    .unwrap();
+    call(&mut s, "stream.set", json!({"id":1,"group":"game","volume":0.8}));
+    s.tick().unwrap();
+    let mut replacement = stream(1, "game", 1.0);
+    replacement.generation = Some("serial-101".into());
+    s.backend.snapshot.streams = vec![replacement];
+    s.tick().unwrap();
+    let state = call(&mut s, "state.get", json!({}));
+    assert_eq!(
+        state["streams"][0]["volume"], 0.8,
+        "a restarted native stream should not become an external edit"
+    );
+    assert_eq!(
+        s.backend.snapshot.streams[0].effective_volume, 0.8,
+        "saved base was not reapplied"
+    );
+}
+
 #[test]
 fn external_amplified_base_survives_a_mix_update() {
     let dir = tempfile::tempdir().unwrap();

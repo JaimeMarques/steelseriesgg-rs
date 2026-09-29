@@ -15,6 +15,9 @@ use std::path::PathBuf;
 pub struct Stream {
     pub id: u32,
     pub app_key: String,
+    /// Backend-specific live object generation. Never part of the renderer RPC.
+    #[serde(skip)]
+    pub generation: Option<String>,
     pub name: String,
     pub app_name: String,
     pub volume: f64,
@@ -181,6 +184,8 @@ struct Stored {
 #[derive(Clone, Serialize, Deserialize)]
 struct Applied {
     key: String,
+    #[serde(default)]
+    generation: Option<String>,
     base: f64,
     base_mute: bool,
     expected: f64,
@@ -426,8 +431,12 @@ impl<B: Backend> Service<B> {
                 return Err(RpcError::backend(e));
             }
         };
-        self.applied
-            .retain(|id, a| self.snapshot.streams.iter().any(|s| s.id == *id && s.app_key == a.key));
+        self.applied.retain(|id, a| {
+            self.snapshot
+                .streams
+                .iter()
+                .any(|s| s.id == *id && s.app_key == a.key && s.generation == a.generation)
+        });
         let mut external_edits = Vec::new();
         for stream in &mut self.snapshot.streams {
             if let Some(a) = self.assignments.get(&stream.app_key) {
@@ -559,6 +568,7 @@ impl<B: Backend> Service<B> {
                 Applied {
                     factor: self.factor(&stream.group),
                     key: stream.app_key,
+                    generation: stream.generation,
                     base: stream.volume,
                     base_mute: stream.muted,
                     expected: volume,
@@ -656,10 +666,15 @@ impl<B: Backend> Service<B> {
                     ),
                     None => self.assignments.get(&stream.app_key).and_then(|a| a.sink.clone()),
                 };
-                if p.sink_id.is_some() {
+                if let Some(target_sink_id) = p.sink_id {
+                    let live_guard: std::sync::Arc<dyn Fn() -> bool + Send + Sync> =
+                        guard.unwrap_or_else(|| std::sync::Arc::new(|| true));
                     self.backend
-                        .set_stream_guarded(p.id, None, None, p.sink_id, &|| guard.as_ref().is_none_or(|g| g()))
+                        .set_stream_guarded_owned(p.id, None, None, Some(target_sink_id), live_guard)
                         .map_err(RpcError::backend)?;
+                    if let Some(changed) = self.snapshot.streams.iter_mut().find(|s| s.id == p.id) {
+                        changed.sink_id = target_sink_id;
+                    }
                 }
                 let assignment = Assignment {
                     group: p.group.unwrap_or(stream.group),
@@ -873,9 +888,13 @@ impl<B: Backend> Service<B> {
                             if let Some(name) = &a.sink {
                                 if let Some(sink) = self.snapshot.sinks.iter().find(|s| &s.name == name) {
                                     self.backend
-                                        .set_stream_guarded(stream.id, None, None, Some(sink.id), &|| {
-                                            guard.as_ref().is_none_or(|g| g())
-                                        })
+                                        .set_stream_guarded_owned(
+                                            stream.id,
+                                            None,
+                                            None,
+                                            Some(sink.id),
+                                            guard.clone().unwrap_or_else(|| std::sync::Arc::new(|| true)),
+                                        )
                                         .map_err(RpcError::backend)?;
                                 }
                             }

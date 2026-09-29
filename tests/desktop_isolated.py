@@ -73,6 +73,16 @@ def wireplumber_policy_command(config_root: Path) -> list[str]:
     raise AssertionError("No audited policy-only WirePlumber configuration; refusing to launch a hardware profile")
 
 
+def private_core_config(policy_command: list[str]) -> str:
+    """Avoid two competing default metadata owners in a private PipeWire graph."""
+    marker = "{ factory = metadata args = { metadata.name = default } }"
+    if policy_command[:2] == ["wireplumber", "-c"]:
+        return CORE
+    if policy_command == ["wireplumber", "--profile=policy"]:
+        return CORE.replace(marker, "")
+    raise AssertionError("Unaudited WirePlumber policy selection")
+
+
 def run():
     policy_command = wireplumber_policy_command(Path("/usr/share/wireplumber"))
     processes = []
@@ -87,7 +97,7 @@ def run():
                    PIPEWIRE_CONFIG_DIR=tmp, DBUS_SESSION_BUS_ADDRESS="unix:path=/nonexistent",
                    PULSE_SERVER=f"unix:{tmp}/pulse/native", PULSE_RUNTIME_PATH=f"{tmp}/pulse")
         (root / "pulse").mkdir(mode=0o700)
-        (root / "core.conf").write_text(CORE)
+        (root / "core.conf").write_text(private_core_config(policy_command))
         (root / "pulse.conf").write_text(PULSE)
         (root / "client.conf").write_text(Path("/usr/share/pipewire/client.conf").read_text())
 

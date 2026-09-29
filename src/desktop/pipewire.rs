@@ -102,6 +102,16 @@ impl Backend for PipeWireBackend {
         })
         .map(|_| ())
     }
+    fn set_stream_guarded(
+        &mut self,
+        _id: u32,
+        _volume: Option<f64>,
+        _muted: Option<bool>,
+        _sink: Option<u32>,
+        _allowed: &dyn Fn() -> bool,
+    ) -> Result<(), String> {
+        Err("Native PipeWire async writes require an owned audio guard".into())
+    }
     fn set_stream_guarded_owned(
         &mut self,
         id: u32,
@@ -140,6 +150,7 @@ fn graph_worker(socket: PathBuf, receiver: Receiver<Request>) {
             _context: context,
             core,
             known: BTreeMap::new(),
+            sink_serials: BTreeMap::new(),
         })
     })();
     match graph {
@@ -166,10 +177,56 @@ struct Graph {
     mainloop: pw::main_loop::MainLoopRc,
     _context: pw::context::ContextRc,
     core: pw::core::CoreRc,
-    known: BTreeMap<u32, (String, Vec<f32>)>,
+    known: BTreeMap<u32, (String, Vec<f32>, f64)>,
+    sink_serials: BTreeMap<u32, String>,
 }
-fn confirmed_channel_gain(channels: &[f32], expected: f64) -> bool {
-    !channels.is_empty() && channels.iter().all(|v| (f64::from(*v) - expected).abs() < 0.01)
+fn gain_from_props(scalar: f64, channels: &[f32]) -> Result<f64, String> {
+    if !scalar.is_finite() || scalar < 0.0 || channels.iter().any(|v| !v.is_finite() || *v < 0.0) {
+        return Err("invalid PipeWire playback gain Props".into());
+    }
+    let raw = if channels.is_empty() {
+        scalar
+    } else {
+        scalar * channels.iter().map(|v| f64::from(*v)).sum::<f64>() / channels.len() as f64
+    };
+    Ok(raw.cbrt())
+}
+fn scalar_target_for_gain(requested: f64) -> Result<f64, String> {
+    let raw = requested.powi(3);
+    if !requested.is_finite() || requested < 0.0 || !raw.is_finite() || !(0.0..=10.0).contains(&raw) {
+        return Err("PipeWire scalar playback gain outside native bounds".into());
+    }
+    Ok(raw)
+}
+fn channel_targets_for_gain(scalar: f64, channels: &[f32], requested: f64) -> Result<Vec<f32>, String> {
+    if !requested.is_finite()
+        || !(0.0..=f64::from(0x7fff_ffff_u32) / 65536.0).contains(&requested)
+        || !scalar.is_finite()
+        || scalar <= 0.0
+        || channels.is_empty()
+        || channels.iter().any(|v| !v.is_finite() || *v < 0.0)
+    {
+        return Err("invalid or non-writable PipeWire playback gain".into());
+    }
+    let mean = channels.iter().map(|v| f64::from(*v)).sum::<f64>() / channels.len() as f64;
+    let desired_raw = requested.powi(3) / scalar;
+    let targets = if mean > 0.0 {
+        channels
+            .iter()
+            .map(|v| f64::from(*v) * desired_raw / mean)
+            .collect::<Vec<_>>()
+    } else {
+        vec![desired_raw; channels.len()]
+    };
+    if targets.iter().any(|v| !v.is_finite() || !(0.0..=10.0).contains(v)) {
+        return Err("PipeWire channel gain outside native bounds".into());
+    }
+    Ok(targets.into_iter().map(|v| v as f32).collect())
+}
+fn confirmed_channel_gain(channels: &[f32], expected: &[f32]) -> bool {
+    !channels.is_empty()
+        && channels.len() == expected.len()
+        && channels.iter().zip(expected).all(|(v, e)| (v - e).abs() < 0.0005)
 }
 fn link_is_routed(state: pw::link::LinkState<'_>) -> bool {
     matches!(state, pw::link::LinkState::Active | pw::link::LinkState::Paused)
@@ -183,6 +240,9 @@ fn linked_sink(sinks: &[u32]) -> Result<u32, String> {
         return Err("PipeWire playback stream has conflicting active Links".into());
     }
     Ok(first)
+}
+fn routable_sink(linked: &[u32], available: &[u32]) -> Option<u32> {
+    linked_sink(linked).ok().filter(|id| available.contains(id))
 }
 fn same_generation(expected: &str, current: &str) -> Result<(), String> {
     if expected.is_empty() || current != expected {
@@ -258,7 +318,7 @@ impl Graph {
                                                 match property.key {
                                                     libspa::sys::SPA_PROP_volume => {
                                                         if let Value::Float(v) = property.value {
-                                                            view.volume = Some(f64::from(v));
+                                                            view.scalar = Some(f64::from(v));
                                                         }
                                                     }
                                                     libspa::sys::SPA_PROP_mute => {
@@ -272,10 +332,6 @@ impl Graph {
                                                         {
                                                             if !values.is_empty() {
                                                                 view.channels = values.clone();
-                                                                view.volume = Some(
-                                                                    values.iter().map(|v| f64::from(*v)).sum::<f64>()
-                                                                        / values.len() as f64,
-                                                                );
                                                             }
                                                         }
                                                     }
@@ -325,14 +381,22 @@ impl Graph {
         self.roundtrip(expires)?;
         let views = nodes.borrow();
         let mut sinks = Vec::new();
+        let mut sink_serials = BTreeMap::new();
         for (&id, view) in views.iter().filter(|(_, v)| v.get("media.class") == "Audio/Sink") {
+            let serial = view.get("object.serial");
+            if serial.is_empty() {
+                return Err(format!("PipeWire sink {id} has no object.serial"));
+            }
+            sink_serials.insert(id, serial.to_owned());
             sinks.push(Sink {
                 id,
                 name: view.get("node.name").into(),
                 description: view.get("node.description").into(),
-                volume: view
-                    .volume
-                    .ok_or_else(|| format!("PipeWire sink {id} has no Props volume"))?,
+                volume: gain_from_props(
+                    view.scalar
+                        .ok_or_else(|| format!("PipeWire sink {id} has no Props volume"))?,
+                    &view.channels,
+                )?,
                 muted: view
                     .muted
                     .ok_or_else(|| format!("PipeWire sink {id} has no Props mute"))?,
@@ -350,10 +414,12 @@ impl Graph {
                 .filter(|&&(output, _, routed)| output == id && routed)
                 .map(|&(_, sink, _)| sink)
                 .collect();
-            let sink_id = linked_sink(&sink_ids)?;
-            if !sinks.iter().any(|sink| sink.id == sink_id) {
-                return Err(format!("PipeWire stream {id} links to a missing audio sink"));
-            }
+            let available: Vec<u32> = sinks.iter().map(|sink| sink.id).collect();
+            let Some(sink_id) = routable_sink(&sink_ids, &available) else {
+                // Stream startup and policy moves may briefly have no unique
+                // active Link; do not invalidate other apps or disarm ChatMix.
+                continue;
+            };
             let binary = view.get("application.process.binary");
             let app_name = view.get("application.name");
             let role = view.get("media.role");
@@ -362,9 +428,10 @@ impl Graph {
             } else {
                 serde_json::to_string(&[binary, app_name, role]).map_err(|e| e.to_string())?
             };
-            let volume = view
-                .volume
+            let scalar = view
+                .scalar
                 .ok_or_else(|| format!("PipeWire stream {id} has no Props volume"))?;
+            let volume = gain_from_props(scalar, &view.channels)?;
             let muted = view
                 .muted
                 .ok_or_else(|| format!("PipeWire stream {id} has no Props mute"))?;
@@ -372,10 +439,11 @@ impl Graph {
             if serial.is_empty() {
                 return Err(format!("PipeWire stream {id} has no object.serial"));
             }
-            known.insert(id, (serial.to_owned(), view.channels.clone()));
+            known.insert(id, (serial.to_owned(), view.channels.clone(), scalar));
             streams.push(Stream {
                 id,
                 app_key,
+                generation: Some(serial.to_owned()),
                 name: view.get("media.name").into(),
                 app_name: app_name.into(),
                 volume,
@@ -387,6 +455,7 @@ impl Graph {
             });
         }
         self.known = known;
+        self.sink_serials = sink_serials;
         Ok(Snapshot { streams, sinks })
     }
 
@@ -399,23 +468,17 @@ impl Graph {
         allowed: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
         expires: Instant,
     ) -> Result<Snapshot, String> {
-        if sink.is_some() {
-            return Err("native routing is unverified; nothing applied".into());
-        }
-        if volume.is_some_and(|v| !v.is_finite() || !(0.0..=10.0).contains(&v)) {
+        if volume.is_some_and(|v| !v.is_finite() || !(0.0..=f64::from(0x7fff_ffff_u32) / 65536.0).contains(&v)) {
             return Err("invalid native PipeWire gain".into());
         }
-        let expected = self.known.get(&id).map(|(serial, _)| serial.clone());
+        let expected = self.known.get(&id).map(|(serial, _, _)| serial.clone());
         let before = self.inventory(expires)?;
         let previous = before
             .streams
             .iter()
             .find(|s| s.id == id)
             .ok_or("PipeWire playback stream disappeared")?;
-        if volume.is_none() && muted.is_none() {
-            return Ok(before);
-        }
-        let (serial, channels) = self
+        let (serial, channels, scalar) = self
             .known
             .get(&id)
             .cloned()
@@ -424,9 +487,20 @@ impl Graph {
             expected.as_deref().ok_or("PipeWire stream had no prior snapshot")?,
             &serial,
         )?;
-        if volume.is_some() && channels.is_empty() {
-            return Err("PipeWire stream has no channelVolumes; refusing unconfirmed gain".into());
+        if let Some(sink_id) = sink
+            && sink_id != previous.sink_id
+        {
+            let sink_serial = self
+                .sink_serials
+                .get(&sink_id)
+                .ok_or("PipeWire destination sink disappeared")?
+                .clone();
+            self.move_stream(id, &serial, sink_id, &sink_serial, allowed.as_ref(), expires)?;
         }
+        if volume.is_none() && muted.is_none() {
+            return self.inventory(expires);
+        }
+
         let registry = self.core.get_registry_rc().map_err(|e| e.to_string())?;
         let weak = registry.downgrade();
         let node = Rc::new(RefCell::new(None::<pw::node::Node>));
@@ -451,11 +525,26 @@ impl Graph {
             .borrow_mut()
             .take()
             .ok_or("PipeWire stream generation changed; nothing applied")?;
+        let target_channels = if channels.is_empty() {
+            None
+        } else {
+            volume
+                .map(|value| channel_targets_for_gain(scalar, &channels, value))
+                .transpose()?
+        };
+        let target_scalar = if channels.is_empty() {
+            volume.map(scalar_target_for_gain).transpose()?
+        } else {
+            None
+        };
         let mut properties = Vec::new();
-        if let Some(value) = volume {
+        if let Some(value) = target_scalar {
+            properties.push(Property::new(libspa::sys::SPA_PROP_volume, Value::Float(value as f32)));
+        }
+        if let Some(values) = &target_channels {
             properties.push(Property::new(
                 libspa::sys::SPA_PROP_channelVolumes,
-                Value::ValueArray(ValueArray::Float(vec![value as f32; channels.len()])),
+                Value::ValueArray(ValueArray::Float(values.clone())),
             ));
         }
         if let Some(value) = muted {
@@ -488,7 +577,7 @@ impl Graph {
             let after = self
                 .inventory(expires)
                 .map_err(|e| format!("PipeWire post-write inventory: {e}"))?;
-            if self.known.get(&id).map(|(s, _)| s.as_str()) != Some(serial.as_str()) {
+            if self.known.get(&id).map(|(s, _, _)| s.as_str()) != Some(serial.as_str()) {
                 return Err("PipeWire stream generation changed before readback".into());
             }
             let current = after
@@ -496,13 +585,18 @@ impl Graph {
                 .iter()
                 .find(|s| s.id == id)
                 .ok_or("PipeWire stream disappeared after write")?;
-            let gain_ok = volume.is_none_or(|v| {
-                self.known
-                    .get(&id)
-                    .is_some_and(|(_, channel_values)| confirmed_channel_gain(channel_values, v))
+            let channels_ok = target_channels.as_ref().is_none_or(|targets| {
+                self.known.get(&id).is_some_and(|(_, channel_values, actual_scalar)| {
+                    (actual_scalar - scalar).abs() < 0.001 && confirmed_channel_gain(channel_values, targets)
+                })
+            });
+            let scalar_ok = target_scalar.is_none_or(|target| {
+                self.known.get(&id).is_some_and(|(_, channel_values, actual)| {
+                    channel_values.is_empty() && (actual - target).abs() < 0.001
+                })
             });
             let mute_ok = muted.is_none_or(|v| current.effective_muted == v);
-            if gain_ok && mute_ok {
+            if channels_ok && scalar_ok && mute_ok {
                 return Ok(after);
             }
             if Instant::now() >= expires {
@@ -511,6 +605,87 @@ impl Graph {
                     previous.effective_volume, previous.effective_muted
                 ));
             }
+        }
+    }
+    fn move_stream(
+        &mut self,
+        id: u32,
+        serial: &str,
+        target: u32,
+        sink_serial: &str,
+        allowed: Option<&Arc<dyn Fn() -> bool + Send + Sync>>,
+        expires: Instant,
+    ) -> Result<(), String> {
+        let registry = self.core.get_registry_rc().map_err(|e| e.to_string())?;
+        let weak = registry.downgrade();
+        let default = Rc::new(RefCell::new(None::<pw::metadata::Metadata>));
+        let found = default.clone();
+        let ambiguous = Rc::new(Cell::new(false));
+        let duplicate = ambiguous.clone();
+        let _listener = registry
+            .add_listener_local()
+            .global(move |global| {
+                if global.type_ == ObjectType::Metadata
+                    && global.props.and_then(|p| p.get("metadata.name")) == Some("default")
+                {
+                    if found.borrow().is_some() {
+                        duplicate.set(true);
+                    } else if let Some(registry) = weak.upgrade() {
+                        *found.borrow_mut() = registry.bind(global).ok();
+                    }
+                }
+            })
+            .register();
+        self.roundtrip(expires)?;
+        if ambiguous.get() {
+            return Err("PipeWire has multiple default metadata owners; routing refused".into());
+        }
+        let metadata = default
+            .borrow_mut()
+            .take()
+            .ok_or("PipeWire default metadata unavailable; no routing command sent")?;
+        // Drain graph events again at the final command boundary. A queued
+        // move must not act on an ID whose stream or sink serial was replaced.
+        self.inventory(expires)?;
+        if self.known.get(&id).map(|(current, _, _)| current.as_str()) != Some(serial)
+            || self.sink_serials.get(&target).map(String::as_str) != Some(sink_serial)
+        {
+            return Err("PipeWire stream or sink generation changed; no routing command sent".into());
+        }
+        if allowed.is_some_and(|guard| !guard()) || Instant::now() >= expires {
+            return Err(
+                "Physical headset unavailable or native route deadline expired; no routing command sent".into(),
+            );
+        }
+        metadata.set_property(id, "target.object", Some("Spa:String"), Some(sink_serial));
+        self.roundtrip(expires)
+            .map_err(|e| format!("PipeWire route barrier: {e}"))?;
+        loop {
+            if Instant::now() >= expires {
+                return Err("PipeWire native route not confirmed by active Link before deadline".into());
+            }
+            match self.inventory(expires) {
+                Ok(after) => {
+                    if self.known.get(&id).is_some_and(|(current, _, _)| current != serial) {
+                        return Err("PipeWire stream generation changed during route".into());
+                    }
+                    if after
+                        .streams
+                        .iter()
+                        .find(|s| s.id == id)
+                        .is_some_and(|s| s.sink_id == target)
+                    {
+                        return Ok(());
+                    }
+                }
+                Err(error) if error.contains("no active Link") || error.contains("conflicting active Links") => {
+                    // WirePlumber removes old links before it creates the new ones.
+                }
+                Err(error) => return Err(error),
+            }
+            self.mainloop
+                .loop_()
+                .iterate(pw::loop_::Timeout::Finite(Duration::from_millis(10)));
         }
     }
     fn roundtrip(&self, expires: Instant) -> Result<(), String> {
@@ -546,7 +721,7 @@ impl Graph {
 #[derive(Default)]
 struct NodeView {
     props: BTreeMap<String, String>,
-    volume: Option<f64>,
+    scalar: Option<f64>,
     muted: Option<bool>,
     channels: Vec<f32>,
 }
@@ -559,15 +734,46 @@ impl NodeView {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn scalar_only_playback_props_are_valid_and_writable() {
+        assert!((super::gain_from_props(0.125, &[]).unwrap() - 0.5).abs() < 0.0001);
+        assert!((super::scalar_target_for_gain(0.8).unwrap() - 0.512).abs() < 0.0001);
+        assert!(super::scalar_target_for_gain(3.0).is_err());
+    }
+
+    #[test]
+    fn pulse_compatible_gain_is_cubic_root_of_native_channel_product() {
+        assert!((super::gain_from_props(1.0, &[0.125, 0.125]).unwrap() - 0.5).abs() < 0.0001);
+        assert!((super::gain_from_props(1.5, &[0.5, 0.5]).unwrap() - 0.75_f64.cbrt()).abs() < 0.0001);
+    }
+
+    #[test]
+    fn native_gain_write_preserves_channel_ratio_and_handles_zero() {
+        let changed = super::channel_targets_for_gain(1.0, &[0.125, 0.25], 0.8).unwrap();
+        assert!((f64::from(changed[1]) / f64::from(changed[0]) - 2.0).abs() < 0.001);
+        assert!((super::gain_from_props(1.0, &changed).unwrap() - 0.8).abs() < 0.001);
+        let restored = super::channel_targets_for_gain(1.0, &[0.0, 0.0], 1.0).unwrap();
+        assert_eq!(restored, vec![1.0, 1.0]);
+        assert!(super::channel_targets_for_gain(0.0, &[0.0, 0.0], 1.0).is_err());
+    }
+
+    #[test]
     fn refusing_a_recycled_node_id_preserves_original_stream_generation() {
         assert!(super::same_generation("71", "72").is_err());
         assert!(super::same_generation("71", "71").is_ok());
     }
 
     #[test]
-    fn uneven_channels_do_not_confirm_a_uniform_gain_write() {
-        assert!(!super::confirmed_channel_gain(&[0.2, 0.6], 0.4));
-        assert!(super::confirmed_channel_gain(&[0.4, 0.4], 0.4));
+    fn uneven_channels_require_matching_individual_readback() {
+        assert!(!super::confirmed_channel_gain(&[0.2, 0.6], &[0.4, 0.4]));
+        assert!(super::confirmed_channel_gain(&[0.2, 0.6], &[0.2, 0.6]));
+    }
+
+    #[test]
+    fn unlinked_or_ambiguous_playback_is_omitted_without_poisoning_other_streams() {
+        assert_eq!(super::routable_sink(&[], &[9, 10]), None);
+        assert_eq!(super::routable_sink(&[9, 10], &[9, 10]), None);
+        assert_eq!(super::routable_sink(&[8], &[9, 10]), None);
+        assert_eq!(super::routable_sink(&[9, 9], &[9, 10]), Some(9));
     }
 
     #[test]

@@ -50,6 +50,16 @@ fn rejected_write_to_missing_private_runtime_is_bounded() {
 }
 
 #[test]
+fn borrowed_guard_is_rejected_for_async_native_writes() {
+    let runtime = tempfile::tempdir().unwrap();
+    let mut backend = PipeWireBackend::connect_at(runtime.path(), "pipewire-0", Duration::from_millis(300)).unwrap();
+    let error = backend
+        .set_stream_guarded(77, Some(0.5), None, None, &|| true)
+        .unwrap_err();
+    assert!(error.contains("owned audio guard"), "{error}");
+}
+
+#[test]
 fn private_graph_enumerates_real_null_sinks_and_playback() {
     let Some(runtime) = std::env::var_os("SSGG_PRIVATE_PW_RUNTIME") else {
         return;
@@ -197,7 +207,7 @@ fn selected_private_service_reports_native_backend_over_rpc() {
 }
 
 #[test]
-fn private_stream_move_fails_closed_until_native_link_confirmation_is_supported() {
+fn private_stream_move_confirms_native_active_link() {
     let Some(runtime) = std::env::var_os("SSGG_PRIVATE_PW_RUNTIME") else {
         return;
     };
@@ -206,11 +216,10 @@ fn private_stream_move_fails_closed_until_native_link_confirmation_is_supported(
     let before = backend.snapshot().unwrap();
     let stream = before.streams.iter().find(|s| s.app_name == "SSGG-Probe").unwrap();
     let destination = before.sinks.iter().find(|s| s.name == "test_b").unwrap().id;
-    let result = backend.set_stream(stream.id, None, None, Some(destination));
-    assert!(result.is_err());
+    backend.set_stream(stream.id, None, None, Some(destination)).unwrap();
     let after = backend.snapshot().unwrap();
     assert_eq!(
         after.streams.iter().find(|s| s.id == stream.id).unwrap().sink_id,
-        stream.sink_id
+        destination
     );
 }
