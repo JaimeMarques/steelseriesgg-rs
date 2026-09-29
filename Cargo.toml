@@ -88,6 +88,8 @@ tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 hidapi = { version = "=2.6.7", default-features = false, features = ["linux-native-basic-udev"] }
+pipewire = "=0.10.1"
+libspa = "=0.10.1"
 
 [target.'cfg(not(target_os = "linux"))'.dependencies]
 hidapi = { version = "=2.6.7" }

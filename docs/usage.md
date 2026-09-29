@@ -2,7 +2,7 @@
 
 ## Music and Discord with ChatMix
 
-Start playback in Chrome and your Discord call first; applications only appear when they create native playback streams.
+Start playback in Chrome and your Discord call first; applications only appear when they create playback streams visible to the selected backend.
 
 1. In **Mixer**, set Chrome's group to **Media** and Discord's to **Chat**.
 2. Set Media's **ChatMix side** to **A** and Chat's to **B**. Leave other groups on **None** if the wheel should not affect them.
@@ -17,7 +17,15 @@ The Nova 7 Gen 2 reports independent gains: the center is A 100% / B 100%, not h
 
 ### Applications and browser tabs
 
-SSGG controls streams exposed by PulseAudio/PipeWire-Pulse. It cannot split browser tabs that Chrome has already combined into one native stream. Start playback and use Refresh if a program is missing. Application names come from native metadata; unknown identities are not guessed.
+On Linux, the service selects native libpipewire when the native socket exists (`$PIPEWIRE_RUNTIME_DIR/pipewire-0`, or `$XDG_RUNTIME_DIR/pipewire-0` when unset; `PIPEWIRE_REMOTE` names a different socket). With no native socket, it uses PulseAudio/PipeWire-Pulse compatibility, which requires `pactl`. To force a backend, start the packaged sidecar **as your desktop user** before opening the GUI:
+
+```sh
+/opt/ssgg/resources/ssgg-desktop --audio-backend pulse     # force legacy protocol
+# or --audio-backend pipewire (requires a working native socket)
+# Then open SSGG from the launcher; it attaches to this independent service.
+```
+
+Stop any SSGG desktop service you own before switching backends; never run two mixers against the same applications. Once a native socket is detected, failed connection or readback is an error, not a silent Pulse fallback. The native service uses PipeWire nodes/metadata. Private-core acceptance does not prove installed strict-Snap mixer authority. Neither backend can split browser tabs Chrome has already combined into one stream. Start playback and use Refresh if a program is missing. Application names come from stream metadata; unknown identities are not guessed.
 
 Output selection moves the selected application stream. SSGG does not create Sonar-style virtual devices or DSP buses.
 

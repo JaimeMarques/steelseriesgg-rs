@@ -6,6 +6,7 @@ Open-source SteelSeries GG replacement for Linux. Controls SteelSeries keyboards
 
 - **Language**: Rust 2024 edition, MSRV 1.97.1
 - **Primary binary**: `ssgg` (`src/main.rs`, clap CLI)
+- **Desktop binary**: `ssgg-desktop` (`src/bin/ssgg_desktop.rs`, independent audio RPC service); Electron/React UI lives in `desktop/`
 - **Library crate**: `steelseries_gg` (`src/lib.rs`)
 - **Platform**: Linux-first; Windows build supported but not primary
 - **Config**: `$XDG_CONFIG_HOME/ssgg/config.toml`
@@ -35,6 +36,9 @@ src/gamesense/server.rs                  Axum HTTP server (port 27301)
 src/audio/mod.rs                         AudioMixer type (feature `audio`)
 src/audio/pulse.rs                       PulseAudio/PipeWire backend
 src/audio/sonar.rs                       SonarClient HTTP integration (feature `sonar`)
+src/desktop/mod.rs                       Desktop service, assignments and policy
+src/desktop/pulse.rs                     Legacy pactl/PipeWire-Pulse backend
+src/desktop/pipewire.rs                  Native libpipewire graph backend (Linux, draft PR #9)
 ```
 
 ### Devices
@@ -90,7 +94,7 @@ When prose docs and code disagree, always trust these files:
 
 ## Toolchain and CI
 
-**Toolchain**: `rust-toolchain.toml` pins `channel = "stable"`. CI jobs explicitly pin **1.97.1** (via the `dtolnay` rust-toolchain action). MSRV declared in `Cargo.toml`: **1.97.1**.
+**Toolchain**: `rust-toolchain.toml` pins `channel = "stable"`. Current CI jobs explicitly pin **1.98.0** (via the `dtolnay` rust-toolchain action). MSRV declared in `Cargo.toml`: **1.97.1**; read the live workflow before repeating these versions.
 
 > Verify the toolchain by reading `rust-toolchain.toml` and `.github/workflows/ci.yml` before quoting any version — memory is unreliable here.
 
@@ -116,7 +120,7 @@ Add `--features <flag>` when touching feature-gated code.
 | **test** | `""`, `--features sonar` (audio excluded — needs `libpulse-dev`) |
 | **build** | `""`, `--features sonar`, `--features audio` |
 
-The `audio` feature requires `libpulse-dev` on Debian/Ubuntu (`sudo apt-get install -y libpulse-dev`).
+The `audio` feature requires `libpulse-dev` on Debian/Ubuntu. The Linux desktop crate now also compiles `pipewire`/`libspa` by default, requiring `libpipewire-0.3-dev`, `libspa-0.2-dev`, libclang and pkg-config even when the optional legacy `audio` feature is off.
 
 ---
 
@@ -136,7 +140,7 @@ The `audio` feature requires `libpulse-dev` on Debian/Ubuntu (`sudo apt-get inst
 ## Hard constraints
 
 1. **HID reports**: always use `HidReportBuilder` and typed helpers in `src/devices/hid_reports.rs`. Never build raw byte arrays by hand.
-2. **hidapi pin**: keep `hidapi = "=2.6.6"` exactly; changing it requires explicit task justification.
+2. **hidapi pin**: keep the current Linux and non-Linux exact pin in `Cargo.toml` (`=2.6.7` at this revision); changing it requires explicit task justification.
 3. **GameSense CORS**: enforce localhost-only origin; the policy may only be tightened, never relaxed.
 4. **Propagate errors**: use `?` or return an explicit `Err` value — no `unwrap` or `expect` in production paths.
 5. **Error types**: `crate::error::Error` with `thiserror` at library boundaries; `anyhow` with `context()` in `src/main.rs` and binaries.

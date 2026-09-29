@@ -195,6 +195,7 @@ try {
       "libnspr4",
       "libnss3",
       "libpango-1.0-0",
+      "libpipewire-0.3-0t64",
       "libudev1",
       "libx11-6",
       "libxcb1",

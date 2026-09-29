@@ -25,6 +25,7 @@ try {
       XDG_DATA_HOME: path.join(root, "data"),
       XDG_CACHE_HOME: path.join(root, "cache"),
       XDG_RUNTIME_DIR: path.join(root, "runtime"),
+      PIPEWIRE_RUNTIME_DIR: path.join(root, "runtime"),
       TMPDIR: path.join(root, "tmp"),
       PULSE_SERVER: `unix:${root}/no-audio.sock`,
       PIPEWIRE_REMOTE: "ssgg-no-audio",

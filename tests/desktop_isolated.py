@@ -5,6 +5,7 @@ SSGG_PACTL and SSGG_PACAT may point to unpacked distro binaries.
 """
 import json
 import os
+import re
 from pathlib import Path
 import subprocess
 import tempfile
@@ -32,11 +33,58 @@ context.modules = [
  { name = libpipewire-module-link-factory }
  { name = libpipewire-module-access args = { access.legacy = false access.socket = { pipewire-0 = "unrestricted" pipewire-0-manager = "unrestricted" } } }
 ]
-context.objects = [ { factory = spa-node-factory args = { factory.name = support.node.driver node.name = Dummy-Driver node.group = pipewire.dummy node.always-process = true priority.driver = 20000 } } ]
+context.objects = [ { factory = metadata args = { metadata.name = default } } { factory = spa-node-factory args = { factory.name = support.node.driver node.name = Dummy-Driver node.group = pipewire.dummy node.always-process = true priority.driver = 20000 } } ]
 '''
 
 
+def wireplumber_policy_command(config_root: Path) -> list[str]:
+    """Select audited policy components, never a default hardware-monitoring profile."""
+    modern = config_root / "wireplumber.conf"
+    if modern.exists():
+        config = modern.read_text()
+        profile = re.search(r"(?m)^\s*policy\s*=\s*\{([^{}]*)\}", config)
+        if profile:
+            policy = profile[1]
+            assert re.search(r"inherits\s*=\s*\[\s*base\s*\]", policy)
+            assert "policy.standard = required" in policy
+            assert not re.search(r"hardware\.|monitor\.", policy)
+            return ["wireplumber", "--profile=policy"]
+    legacy = config_root / "policy.conf"
+    if legacy.exists():
+        # Strip SPA comment lines before validating the effective component list.
+        policy = "\n".join(line.split("#", 1)[0] for line in legacy.read_text().splitlines())
+        blocks = re.findall(r"wireplumber\.components\s*=\s*\[([^\]]*)\]", policy, re.S)
+        assert len(blocks) == 1, "Expected exactly one WirePlumber component list"
+        components = re.findall(r"\{([^{}]*)\}", blocks[0])
+        assert not re.sub(r"\{[^{}]*\}", "", blocks[0]).strip(), "Unparsed WirePlumber component"
+        parsed = set()
+        for component in components:
+            fields = dict(re.findall(r"\b(name|type)\s*=\s*([\w./-]+)", component))
+            assert len(fields) == 2, "Unknown WirePlumber component field"
+            assert not re.sub(r"\b(?:name|type)\s*=\s*[\w./-]+", "", component).replace(",", "").strip(), "Unexpected component arguments"
+            parsed.add((fields["name"], fields["type"]))
+        assert len(components) == len(parsed), "Duplicate WirePlumber components"
+        assert parsed == {
+            ("libwireplumber-module-lua-scripting", "module"),
+            ("policy.lua", "config/lua"),
+        }, "Legacy policy must load only the Lua engine and policy.lua"
+        assert not re.search(r"api\.(?:alsa|bluez|v4l2|libcamera)\.|monitor\.", policy)
+        return ["wireplumber", "-c", str(legacy)]
+    raise AssertionError("No audited policy-only WirePlumber configuration; refusing to launch a hardware profile")
+
+
+def private_core_config(policy_command: list[str]) -> str:
+    """Avoid two competing default metadata owners in a private PipeWire graph."""
+    marker = "{ factory = metadata args = { metadata.name = default } }"
+    if policy_command[:2] == ["wireplumber", "-c"]:
+        return CORE
+    if policy_command == ["wireplumber", "--profile=policy"]:
+        return CORE.replace(marker, "")
+    raise AssertionError("Unaudited WirePlumber policy selection")
+
+
 def run():
+    policy_command = wireplumber_policy_command(Path("/usr/share/wireplumber"))
     processes = []
     with tempfile.TemporaryDirectory(prefix="ssgg-audio-isolated-") as tmp:
         root = Path(tmp)
@@ -49,7 +97,7 @@ def run():
                    PIPEWIRE_CONFIG_DIR=tmp, DBUS_SESSION_BUS_ADDRESS="unix:path=/nonexistent",
                    PULSE_SERVER=f"unix:{tmp}/pulse/native", PULSE_RUNTIME_PATH=f"{tmp}/pulse")
         (root / "pulse").mkdir(mode=0o700)
-        (root / "core.conf").write_text(CORE)
+        (root / "core.conf").write_text(private_core_config(policy_command))
         (root / "pulse.conf").write_text(PULSE)
         (root / "client.conf").write_text(Path("/usr/share/pipewire/client.conf").read_text())
 
@@ -91,14 +139,14 @@ def run():
                 pa("load-module", "module-null-sink", f"sink_name={name}")
             sinks = json.loads(pa("-f", "json", "list", "sinks"))
             assert {s["name"] for s in sinks} == {"test_a", "test_b"}
-            # Stock 'policy' profile inherits only base + policy.standard, never hardware.*.
-            # No ALSA/Bluetooth/video monitor is loaded; all connections use our private core.
-            spawn(["wireplumber", "--profile=policy"], stdout=logs)
+            # Stock 0.5 policy inherits base; 0.4 policy.conf loads policy.lua only.
+            # No ALSA/Bluetooth/video monitor is loaded; all clients use our private core.
+            spawn(policy_command, stdout=logs)
             wait(lambda: "WirePlumber" in pa("-f", "json", "list", "clients"))
             null_input = open("/dev/zero", "rb")
             app = spawn([pacat, "--playback", "--raw", "--device=test_a", "--client-name=SSGG-Isolated-Game", "--stream-name=Silence", "--property=media.role=game"], stdin=null_input, stdout=logs)
             wait(lambda: any(s["sink"] != 4294967295 for s in json.loads(pa("-f", "json", "list", "sink-inputs"))))
-            sidecar = spawn([binary, "--stdio", "--config", str(root / "desktop/state.json")], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, bufsize=1)
+            sidecar = spawn([binary, "--stdio", "--audio-backend", "pulse", "--config", str(root / "desktop/state.json")], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, bufsize=1)
             assert sidecar.stdin is not None and sidecar.stdout is not None
             counter = 0
 
@@ -115,6 +163,7 @@ def run():
                 return response["result"]
 
             state = rpc("state.get")
+            assert state["backend"]["name"] == "PulseAudio / PipeWire-Pulse", "legacy regression must exercise the Pulse backend"
             assert len(state["streams"]) == 1 and len(state["sinks"]) == 2, state
             stream_id = state["streams"][0]["id"]
             pa("set-sink-input-volume", str(stream_id), "98304")

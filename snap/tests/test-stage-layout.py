@@ -20,6 +20,7 @@ RUNTIME_PATHS = {
         "usr/lib/x86_64-linux-gnu/libpulse.so.0",
         "usr/lib/x86_64-linux-gnu/pulseaudio/libpulsecommon.so",
     ],
+    "libpipewire-0.3-0t64": ["usr/lib/x86_64-linux-gnu/libpipewire-0.3.so.0"],
     "libudev1": ["usr/lib/x86_64-linux-gnu/libudev.so.1"],
     "libnss3": ["usr/lib/x86_64-linux-gnu/libnss3.so"],
     "libnspr4": ["usr/lib/x86_64-linux-gnu/libnspr4.so"],

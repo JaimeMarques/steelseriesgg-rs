@@ -9,6 +9,9 @@ set -eu
 export XDG_CONFIG_HOME="$SNAP_USER_DATA/.config"
 export XDG_CACHE_HOME="$SNAP_USER_COMMON/.cache"
 export SSGG_PACTL="$SNAP/usr/bin/pactl"
+# The native sidecar is dynamically linked; search staged core24 libraries
+# before GNOME extension paths without replacing the extension's runtime.
+export LD_LIBRARY_PATH="$SNAP/usr/lib/x86_64-linux-gnu:${LD_LIBRARY_PATH:-}"
 mkdir -p "$XDG_CONFIG_HOME" "$XDG_CACHE_HOME"
 
 # GNOME's command chain normally sets this; preserve explicit private test servers.

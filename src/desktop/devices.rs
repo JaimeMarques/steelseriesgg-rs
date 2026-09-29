@@ -36,6 +36,16 @@ pub fn with_physical(mut entries: Vec<Value>, physical: &super::hardware::Physic
     }
     entries
 }
+fn artwork_key(vendor_id: u16, product_id: u16) -> Option<&'static str> {
+    if vendor_id != 0x1038 {
+        return None;
+    }
+    match product_id {
+        0x227e => Some("arctis-nova-7-gen-2"),
+        0x1642 => Some("apex-pro-tkl-gen-3"),
+        _ => None,
+    }
+}
 pub fn inventory() -> crate::Result<Vec<Value>> {
     let api = hidapi::HidApi::new()?;
     let mut devices = std::collections::BTreeMap::new();
@@ -65,9 +75,24 @@ pub fn inventory() -> crate::Result<Vec<Value>> {
         devices.entry(id.clone()).or_insert_with(||json!({
    "id":id,"name":info.product_string().unwrap_or("SteelSeries device"),"vendorId":info.vendor_id(),"productId":info.product_id(),
    "connected":true,"kind":if nova {"headset"} else if rgb_model || info.product_id() == 0x1628 {"keyboard"} else {"other"},"battery":null,
-   "artworkKey":if nova {Some("arctis-nova-7-gen-2")} else {None},"capabilities":capabilities,
+   "artworkKey":artwork_key(info.vendor_id(), info.product_id()),"capabilities":capabilities,
    "hardwareEnabled":false,"hardwareAcquired":false,"protocolStatus":if nova {"Source-supported dedicated protocol; local hardware validation pending"} else {"Unverified model"}
   }));
     }
     Ok(devices.into_values().collect())
+}
+
+#[cfg(test)]
+mod artwork_tests {
+    use super::artwork_key;
+
+    #[test]
+    fn exact_models_only_keep_their_own_artwork_keys() {
+        assert_eq!(artwork_key(0x1038, 0x1642), Some("apex-pro-tkl-gen-3"));
+        assert_eq!(artwork_key(0x1038, 0x227e), Some("arctis-nova-7-gen-2"));
+        assert_eq!(artwork_key(0x1038, 0x1628), None);
+        assert_eq!(artwork_key(0x1038, 0x1630), None);
+        assert_eq!(artwork_key(0x1038, 0xffff), None);
+        assert_eq!(artwork_key(0x1234, 0x1642), None);
+    }
 }

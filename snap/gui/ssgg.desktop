@@ -6,4 +6,4 @@ Exec=ssgg
 Icon=${SNAP}/usr/share/icons/hicolor/scalable/apps/ssgg.svg
 Terminal=false
 Categories=Settings;HardwareSettings;AudioVideo;
-StartupWMClass=ssgg-desktop
+StartupWMClass=io.github.MrTheSoulz.SSGG

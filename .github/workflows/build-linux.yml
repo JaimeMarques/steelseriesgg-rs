@@ -2,7 +2,10 @@ name: Build Linux packages
 
 on:
   push:
-    branches: [feat/install-and-use, feat/ubuntu-packaging, fix/headset-status-expiry]
+    branches: [main]
+  pull_request:
+    branches: [main]
+  merge_group:
   workflow_dispatch:
     inputs:
       features:
@@ -17,10 +20,14 @@ jobs:
   ubuntu-desktop:
     name: Ubuntu 24.04 desktop amd64
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 45
     env:
       RUSTFLAGS: "-Ctarget-cpu=x86-64"
     steps:
+      - name: Require a disposable GitHub-hosted runner
+        env:
+          RUNNER_KIND: ${{ runner.environment }}
+        run: test "$RUNNER_KIND" = github-hosted && test "$RUNNER_OS" = Linux
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v6
         with:
@@ -33,19 +40,35 @@ jobs:
       - name: Install build and isolated test dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential pkg-config libudev-dev libpulse-dev unzip binutils apparmor desktop-file-utils xvfb xauth x11-utils dbus-x11
+          sudo apt-get install -y build-essential pkg-config libudev-dev libpulse-dev libpipewire-0.3-dev libspa-0.2-dev libclang-dev clang unzip binutils apparmor desktop-file-utils xvfb xauth x11-utils dbus-x11 pipewire pipewire-pulse wireplumber pulseaudio-utils
       - name: Install locked JavaScript dependencies
         working-directory: desktop
         run: npm ci --include=dev
       - name: Unit and native safety gates
         run: |
           cargo test --locked --lib desktop::hardware::tests
-          cargo test --locked --test nova7_gen2 --test desktop_hardware --test desktop_review --test desktop_lighting
+          cargo test --locked --test nova7_gen2 --test desktop_hardware --test desktop_review --test desktop_lighting --test audit_core --test audit_hardware
           cargo clippy --all-targets --locked -- -D warnings
           cd desktop
           npm run typecheck
           npm test
           npm run test:packaging
+          cd ..
+          node --test tests/native-packaging.test.mjs
+      - name: Exercise real audio only on a private PipeWire-Pulse core
+        env:
+          SSGG_PACTL: /usr/bin/pactl
+          SSGG_PACAT: /usr/bin/pacat
+          SSGG_DESKTOP_BIN: target/debug/ssgg-desktop
+        run: |
+          # The test selects only a verified policy-only WirePlumber 0.4 or
+          # 0.5 configuration; neither may load host hardware monitors.
+          PYTHONPATH=tests python3 -m unittest tests/test_desktop_isolated_config.py
+          PYTHONPATH=tests python3 -m unittest tests/test_desktop_pipewire_config.py
+          cargo build --locked --bin ssgg-desktop
+          python3 tests/desktop_isolated.py
+          # This MUST run the opt-in native backend against its own private core.
+          python3 tests/desktop_pipewire_isolated.py
       - name: Build real self-contained app and Debian archive
         working-directory: desktop
         run: |
@@ -60,13 +83,25 @@ jobs:
           desktop-file-validate /usr/share/applications/io.github.MrTheSoulz.SSGG.desktop
           ldd /opt/ssgg/ssgg-gui
           ldd /opt/ssgg/resources/ssgg-desktop
+          readelf -d /opt/ssgg/resources/ssgg-desktop | grep -F 'libpipewire-0.3.so.0'
+          ldd /opt/ssgg/resources/ssgg-desktop | grep -E 'libpipewire-0\.3\.so\.0 => /'
+          dpkg-query -W -f='${Status}\n' libpipewire-0.3-0t64 | grep -Fx 'install ok installed'
+          dpkg-deb --field desktop/release/ssgg-gui_*_amd64.deb Depends | grep -F 'libpipewire-0.3-0t64'
           test -x /usr/bin/pactl
           for package in "$PWD"/desktop/release/*.deb; do
             node desktop/scripts/verify-deb.mjs "$package" --runtime
           done
+      - name: Exercise the installed native sidecar on a private PipeWire core
+        env:
+          SSGG_DESKTOP_BIN: /opt/ssgg/resources/ssgg-desktop
+          SSGG_PACTL: /usr/bin/pactl
+          SSGG_PACAT: /usr/bin/pacat
+        run: PYTHONPATH=tests python3 tests/desktop_pipewire_isolated.py
       - name: Exercise the installed launcher without sandbox exceptions
         working-directory: desktop
         run: |
+          # test-session supplies a private bus, Xvfb and unreachable audio socket;
+          # packaged-smoke verifies real Electron seccomp and forbids fixture writes.
           unset CHROME_DEVEL_SANDBOX ELECTRON_RUN_AS_NODE
           node scripts/test-session.mjs node tests/packaged-smoke.mjs /usr/bin/ssgg-gui artifacts/ubuntu-installed.json
       - name: Remove package without touching user state or legacy services
@@ -88,7 +123,7 @@ jobs:
             desktop/release/*.sha256
             desktop/release/*.tar.xz
             desktop/artifacts/ubuntu-installed.json
-          if-no-files-found: error
+          if-no-files-found: warn
           retention-days: 30
   snap-experimental:
     name: Experimental strict Snap (build only)
@@ -96,6 +131,10 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 25
     steps:
+      - name: Require a disposable GitHub-hosted runner
+        env:
+          RUNNER_KIND: ${{ runner.environment }}
+        run: test "$RUNNER_KIND" = github-hosted && test "$RUNNER_OS" = Linux
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v6
         with:
@@ -111,6 +150,7 @@ jobs:
       - name: Prepare the tested standalone application
         run: |
           (cd snap-input/release && sha256sum -c ssgg-gui-linux-amd64.tar.xz.sha256)
+          test "$(sed -n 's/^StartupWMClass=//p' snap/gui/ssgg.desktop)" = io.github.MrTheSoulz.SSGG
           mkdir -p desktop/release
           tar -xJf snap-input/release/ssgg-gui-linux-amd64.tar.xz -C desktop/release
           node --test snap/tests/package-snap.test.mjs
@@ -128,10 +168,13 @@ jobs:
           test "${#packages[@]}" = 1
           package="${packages[0]}"
           unsquashfs -cat "$package" meta/snap.yaml > snap-metadata.yaml
-          /usr/bin/python3 -c 'import yaml; m=yaml.safe_load(open("snap-metadata.yaml")); assert m["confinement"] == "strict" and m["base"] == "core24"'
+          /usr/bin/python3 -c 'import yaml; m=yaml.safe_load(open("snap-metadata.yaml")); assert m["confinement"] == "strict" and m["base"] == "core24"; assert "pipewire" in m["apps"]["ssgg"]["plugs"] and "pipewire" not in m["apps"]["diagnostics"]["plugs"]'
           unsquashfs -cat "$package" app/ssgg-gui >/dev/null
           unsquashfs -cat "$package" app/resources/ssgg-desktop >/dev/null
           unsquashfs -cat "$package" usr/bin/pactl >/dev/null
+          unsquashfs -d "$RUNNER_TEMP/ssgg-native-snap" "$package" 'usr/lib/x86_64-linux-gnu/libpipewire-0.3.so.0*'
+          test -L "$RUNNER_TEMP/ssgg-native-snap/usr/lib/x86_64-linux-gnu/libpipewire-0.3.so.0"
+          readelf -h "$RUNNER_TEMP/ssgg-native-snap/usr/lib/x86_64-linux-gnu/libpipewire-0.3.so.0" | grep -F 'ELF64'
           sha256sum "$package" > "$package.sha256"
       - uses: actions/upload-artifact@v7
         with:

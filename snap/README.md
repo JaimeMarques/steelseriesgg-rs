@@ -32,7 +32,7 @@ core24 to silence linker errors. Rebuild on the matching base instead.
 With Snapcraft and its supported isolated builder installed, the command runs
 `snapcraft pack` in the prepared project and checks the resulting SquashFS
 metadata for `confinement: strict` and `base: core24`. It prints the actual
-artifact path. Snapcraft stages `pactl` and its dependencies from the core24
+artifact path. Snapcraft stages `pactl`, `libpipewire-0.3.so.0` and their dependencies from the core24
 Ubuntu archive and expands GNOME's desktop/runtime/GPU integration. No package
 relies on an absolute development-machine cache path. No Store login or
 publication is performed.
@@ -86,7 +86,13 @@ individually distinguished by those attributes. The application must still
 honor its own device selection and explicit hardware-enable gate. Device ACLs
 and the actual hidapi enumeration/open behavior still need installed testing.
 
-### Audio playback is not an audio-manager entitlement
+### Native PipeWire access is not an audio-manager entitlement
+
+The GUI app declares the `pipewire` plug for native socket access; diagnostics
+keeps only its existing read-only Pulse checks and does not receive this plug.
+Check the installed `ssgg:pipewire` connection separately from the build.
+Even when connected, the sound server's session policy can restrict visibility
+and write authority over unrelated clients. The plug is not a blanket mixer grant.
 
 [`audio-playback`](https://snapcraft.io/docs/audio-playback-interface) normally
 auto-connects. The [snapd policy](https://github.com/canonical/snapd/blob/master/interfaces/builtin/audio_playback.go)
@@ -104,10 +110,11 @@ See also the [Ubuntu mediation fix](https://bugs.launchpad.net/ubuntu/+source/pi
 
 The recipe does not request recording permission for a mixer, does not use the
 deprecated `pulseaudio` interface, and does not rewrite the host's audio policy.
-An installed strict build must prove enumeration and control against a private
-Pulse/PipeWire server and unrelated test clients before cross-app mixing can be
+An installed strict build must prove enumeration and native control against a
+private PipeWire server and unrelated test clients before cross-app mixing can be
 claimed. Unconfined `pactl` success is not that proof. No such installed test has
-been performed by this packaging work.
+been performed by this packaging work. The supported Ubuntu `.deb` is independent
+of Snap's installed HID slot availability.
 
 ### Keeping the Electron sandbox needs additional approval
 
@@ -146,7 +153,9 @@ host policy. Do not restart PipeWire/PulseAudio or reboot as a permissions fix.
 
 GNOME initializes display, fonts and runtime libraries. The launcher preserves
 Snap's private `XDG_RUNTIME_DIR`, sets config to `$SNAP_USER_DATA/.config`, and
-uses bundled `pactl`; it preserves an explicit `PULSE_SERVER` for private tests.
+uses bundled `pactl` for legacy mode; the native PipeWire library is staged
+separately under `$SNAP/usr/lib/x86_64-linux-gnu`. It preserves an explicit
+`PULSE_SERVER` for private tests.
 It does not import native SSGG state or connect to the native private service.
 Leave hardware and active mixing disabled during initial inspection. To revoke
 hardware access, disconnect the specific `ssgg:hidraw` connection after disabling
@@ -169,9 +178,11 @@ at the Snap root while Electron stays under `app/`. It does not stage packages
 or produce runtime libraries. The skeleton check invokes real
 `snap pack --check-skeleton` for authored runtime metadata and executable bits;
 it does not pretend to expand the GNOME extension or verify staged libraries.
+CI checks the real staged native library path in the SquashFS; this remains a
+build-only gate, not installed strict mixer or HID acceptance.
 
-At initial implementation, the shared app was not yet available and Snapcraft
-was not installed. No `.snap` was produced or installed. The observed target
+Earlier packaging inspection had no shared app available and no Snapcraft
+installed, so it produced or installed no `.snap`. The observed target
 reported snap/snapd 2.76.3 on Ubuntu 26.04; `snap interface hidraw` returned the
 interface description **without any slots**. Reading the experimental-hotplug
 system setting was access-denied, so its value was not inferred. The installed

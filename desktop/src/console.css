@@ -47,18 +47,35 @@
     color: #a9c6c0;
   }
   .scene {
-    animation: console-switch 360ms var(--ease) both;
-    transform-origin: 50% 10%;
+    animation: console-switch 300ms var(--ease) both;
   }
   @keyframes console-switch {
     from {
-      transform: translateY(12px) scale(0.994);
-      clip-path: inset(0 0 12px 0 round 12px);
+      opacity: 0;
+      transform: translateY(10px);
     }
     to {
-      transform: translateY(0) scale(1);
-      clip-path: inset(0 0 0 0 round 0);
+      opacity: 1;
+      transform: translateY(0);
     }
+  }
+  .scene .device-stage,
+  .scene .device-story {
+    animation: device-arrive 340ms var(--ease) both;
+  }
+  .scene .device-story { animation-delay: 55ms; }
+  @keyframes device-arrive {
+    from { opacity: 0; transform: translateY(8px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+  [data-page-visible="false"] .scene,
+  [data-page-visible="false"] .scene * {
+    animation-play-state: paused !important;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .scene,
+    .scene .device-stage,
+    .scene .device-story { animation: none !important; }
   }
   .save-status {
     height: 20px;

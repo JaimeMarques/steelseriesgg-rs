@@ -2,6 +2,8 @@
 pub mod devices;
 pub mod hardware;
 pub mod lighting;
+#[cfg(target_os = "linux")]
+pub mod pipewire;
 pub mod pulse;
 pub mod rpc;
 use serde::{Deserialize, Serialize};
@@ -13,6 +15,9 @@ use std::path::PathBuf;
 pub struct Stream {
     pub id: u32,
     pub app_key: String,
+    /// Backend-specific live object generation. Never part of the renderer RPC.
+    #[serde(skip)]
+    pub generation: Option<String>,
     pub name: String,
     pub app_name: String,
     pub volume: f64,
@@ -37,6 +42,9 @@ pub struct Snapshot {
 }
 pub trait Backend {
     fn begin_cycle(&mut self) {}
+    fn backend_name(&self) -> &'static str {
+        "PulseAudio / PipeWire-Pulse"
+    }
     fn snapshot(&mut self) -> Result<Snapshot, String>;
     fn set_stream(
         &mut self,
@@ -57,6 +65,16 @@ pub trait Backend {
             return Err("Physical headset unavailable; audio write cancelled".into());
         }
         self.set_stream(id, volume, muted, sink)
+    }
+    fn set_stream_guarded_owned(
+        &mut self,
+        id: u32,
+        volume: Option<f64>,
+        muted: Option<bool>,
+        sink: Option<u32>,
+        allowed: std::sync::Arc<dyn Fn() -> bool + Send + Sync>,
+    ) -> Result<(), String> {
+        self.set_stream_guarded(id, volume, muted, sink, &*allowed)
     }
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -166,6 +184,8 @@ struct Stored {
 #[derive(Clone, Serialize, Deserialize)]
 struct Applied {
     key: String,
+    #[serde(default)]
+    generation: Option<String>,
     base: f64,
     base_mute: bool,
     expected: f64,
@@ -262,6 +282,15 @@ impl<B: Backend> Service<B> {
             service.assignments = stored.current.assignments;
             service.profiles = stored.profiles;
             service.applied = stored.applied;
+            // Pulse reuses numeric sink-input IDs. Identity-less streams have no
+            // stable app identity and must not inherit a prior stream's policy.
+            service.assignments.retain(|key, _| !key.starts_with("anonymous:"));
+            service
+                .applied
+                .retain(|_, applied| !applied.key.starts_with("anonymous:"));
+            for profile in service.profiles.values_mut() {
+                profile.assignments.retain(|key, _| !key.starts_with("anonymous:"));
+            }
         }
         // Resuming a GUI or service must never automatically enable attenuation.
         service.mixer.enabled = false;
@@ -368,12 +397,23 @@ impl<B: Backend> Service<B> {
     }
     pub fn request(&mut self, request: Value) -> Value {
         self.backend.begin_cycle();
+        // Preserve the write policy that was in force when this request arrived.
+        // sync_hardware disarms an offline mixer, but cannot turn this same
+        // request into an unguarded stream mutation.
+        let hardware_mix_before_sync = self.mixer.enabled && self.mixer.input_mode == hardware::InputMode::Hardware;
         self.sync_hardware();
         let id = request.get("id").cloned().unwrap_or(Value::Null);
-        let result = match request["method"].as_str() {
-            Some(method) => self.dispatch(method, request.get("params").cloned().unwrap_or(json!({}))),
-            None => Err(RpcError::new("INVALID_REQUEST", "method must be a string")),
-        };
+        let result =
+            if hardware_mix_before_sync && request["method"] == "stream.set" && !self.hardware.audio_write_guard()() {
+                Err(RpcError::backend(
+                    "Physical headset unavailable; audio write cancelled".into(),
+                ))
+            } else {
+                match request["method"].as_str() {
+                    Some(method) => self.dispatch(method, request.get("params").cloned().unwrap_or(json!({}))),
+                    None => Err(RpcError::new("INVALID_REQUEST", "method must be a string")),
+                }
+            };
         match result {
             Ok(result) => json!({"id":id,"result":result}),
             Err(e) => json!({"id":id,"error":{"code":e.code,"message":e.message}}),
@@ -391,8 +431,12 @@ impl<B: Backend> Service<B> {
                 return Err(RpcError::backend(e));
             }
         };
-        self.applied
-            .retain(|id, a| self.snapshot.streams.iter().any(|s| s.id == *id && s.app_key == a.key));
+        self.applied.retain(|id, a| {
+            self.snapshot
+                .streams
+                .iter()
+                .any(|s| s.id == *id && s.app_key == a.key && s.generation == a.generation)
+        });
         let mut external_edits = Vec::new();
         for stream in &mut self.snapshot.streams {
             if let Some(a) = self.assignments.get(&stream.app_key) {
@@ -404,7 +448,7 @@ impl<B: Backend> Service<B> {
                     let mute_changed = !a.pending && stream.muted != a.expected_mute;
                     if volume_changed {
                         a.base = if a.factor > 0.0 {
-                            (stream.effective_volume / a.factor).clamp(0.0, 1.0)
+                            (stream.effective_volume / a.factor).clamp(0.0, f64::from(0x7fff_ffff_u32) / 65536.0)
                         } else {
                             stream.effective_volume
                         };
@@ -501,7 +545,7 @@ impl<B: Backend> Service<B> {
                     if let Some(sink) = self.snapshot.sinks.iter().find(|s| &s.name == name) {
                         if sink.id != stream.sink_id {
                             self.backend
-                                .set_stream_guarded(stream.id, None, None, Some(sink.id), &*guard)
+                                .set_stream_guarded_owned(stream.id, None, None, Some(sink.id), guard.clone())
                                 .map_err(RpcError::backend)?;
                         }
                     }
@@ -524,6 +568,7 @@ impl<B: Backend> Service<B> {
                 Applied {
                     factor: self.factor(&stream.group),
                     key: stream.app_key,
+                    generation: stream.generation,
                     base: stream.volume,
                     base_mute: stream.muted,
                     expected: volume,
@@ -533,7 +578,7 @@ impl<B: Backend> Service<B> {
             );
             if gain.is_some() || mute.is_some() {
                 self.backend
-                    .set_stream_guarded(stream.id, gain, mute, None, &*guard)
+                    .set_stream_guarded_owned(stream.id, gain, mute, None, guard.clone())
                     .map_err(RpcError::backend)?;
             }
             if let Some(a) = self.applied.get_mut(&stream.id) {
@@ -549,7 +594,7 @@ impl<B: Backend> Service<B> {
             Err(e) => (Vec::new(), Some(e.to_string())),
         };
         self.lighting.decorate(&mut devices);
-        json!({"streams":self.snapshot.streams,"sinks":self.snapshot.sinks,"groups":self.groups,"mixer":self.mixer,"physical":self.physical,"settings":self.settings,"profiles":self.profile_names(),"devices":devices,"deviceError":device_error,"backend":{"name":"PulseAudio / PipeWire-Pulse","connected":error.is_none(),"error":error}})
+        json!({"streams":self.snapshot.streams,"sinks":self.snapshot.sinks,"groups":self.groups,"mixer":self.mixer,"physical":self.physical,"settings":self.settings,"profiles":self.profile_names(),"devices":devices,"deviceError":device_error,"backend":{"name":self.backend.backend_name(),"connected":error.is_none(),"error":error}})
     }
     fn dispatch(&mut self, method: &str, params: Value) -> Result<Value, RpcError> {
         if self.read_only
@@ -587,7 +632,15 @@ impl<B: Backend> Service<B> {
                 {
                     return Err(RpcError::invalid("unknown group"));
                 }
+                let hardware_mix = self.mixer.enabled && self.mixer.input_mode == hardware::InputMode::Hardware;
+                let guard = hardware_mix.then(|| self.hardware.audio_write_guard());
                 self.refresh()?;
+                if guard.as_ref().is_some_and(|g| !g()) {
+                    self.sync_hardware();
+                    return Err(RpcError::backend(
+                        "Physical headset unavailable; audio write cancelled".into(),
+                    ));
+                }
                 let stream = self
                     .snapshot
                     .streams
@@ -595,6 +648,12 @@ impl<B: Backend> Service<B> {
                     .find(|s| s.id == p.id)
                     .ok_or_else(|| RpcError::new("NOT_FOUND", "stream disappeared"))?
                     .clone();
+                if stream.app_key.starts_with("anonymous:") {
+                    return Err(RpcError::new(
+                        "UNSUPPORTED",
+                        "This stream has no stable application identity; persistent assignment would affect an unrelated stream when its ID is reused",
+                    ));
+                }
                 let sink = match p.sink_id {
                     Some(id) => Some(
                         self.snapshot
@@ -607,10 +666,15 @@ impl<B: Backend> Service<B> {
                     ),
                     None => self.assignments.get(&stream.app_key).and_then(|a| a.sink.clone()),
                 };
-                if p.sink_id.is_some() {
+                if let Some(target_sink_id) = p.sink_id {
+                    let live_guard: std::sync::Arc<dyn Fn() -> bool + Send + Sync> =
+                        guard.unwrap_or_else(|| std::sync::Arc::new(|| true));
                     self.backend
-                        .set_stream(p.id, None, None, p.sink_id)
+                        .set_stream_guarded_owned(p.id, None, None, Some(target_sink_id), live_guard)
                         .map_err(RpcError::backend)?;
+                    if let Some(changed) = self.snapshot.streams.iter_mut().find(|s| s.id == p.id) {
+                        changed.sink_id = target_sink_id;
+                    }
                 }
                 let assignment = Assignment {
                     group: p.group.unwrap_or(stream.group),
@@ -807,7 +871,37 @@ impl<B: Backend> Service<B> {
                             "Acquire a fresh connected receiver before applying an enabled hardware profile",
                         ));
                     }
+                    let guard = (profile.mixer.enabled && profile.mixer.input_mode == hardware::InputMode::Hardware)
+                        .then(|| self.hardware.audio_write_guard());
                     self.refresh()?;
+                    if guard.as_ref().is_some_and(|g| !g()) {
+                        self.sync_hardware();
+                        return Err(RpcError::backend(
+                            "Physical headset unavailable; audio write cancelled".into(),
+                        ));
+                    }
+                    // Complete the guarded routes before publishing the new policy.
+                    // If a later route fails, already-issued commands cannot be
+                    // undone, but the service must not commit a half-applied profile.
+                    for stream in &self.snapshot.streams {
+                        if let Some(a) = profile.assignments.get(&stream.app_key) {
+                            if let Some(name) = &a.sink {
+                                if let Some(sink) = self.snapshot.sinks.iter().find(|s| &s.name == name) {
+                                    self.backend
+                                        .set_stream_guarded_owned(
+                                            stream.id,
+                                            None,
+                                            None,
+                                            Some(sink.id),
+                                            guard.clone().unwrap_or_else(|| std::sync::Arc::new(|| true)),
+                                        )
+                                        .map_err(RpcError::backend)?;
+                                }
+                            }
+                        }
+                    }
+                    let previous = self.profile();
+                    let previous_streams = self.snapshot.streams.clone();
                     self.groups = profile.groups;
                     self.mixer = profile.mixer;
                     self.assignments = profile.assignments;
@@ -817,17 +911,25 @@ impl<B: Backend> Service<B> {
                             stream.group = a.group.clone();
                             stream.volume = a.volume;
                             stream.muted = a.muted;
-                            if let Some(name) = &a.sink {
-                                if let Some(sink) = self.snapshot.sinks.iter().find(|s| &s.name == name) {
-                                    self.backend
-                                        .set_stream(stream.id, None, None, Some(sink.id))
-                                        .map_err(RpcError::backend)?;
-                                }
-                            }
                         }
                     }
-                    self.apply(None)?;
-                    self.persist()?;
+                    let result = self.apply(None).and_then(|_| self.persist());
+                    if let Err(error) = result {
+                        self.groups = previous.groups;
+                        self.mixer = previous.mixer;
+                        self.assignments = previous.assignments;
+                        self.snapshot.streams = previous_streams;
+                        // A command may have changed native audio before a later
+                        // command failed. Old expected gains would misclassify it
+                        // as an external edit and overwrite the saved base intent.
+                        // Leave actual native readback visible, but require a new
+                        // explicit activation before any further policy writes.
+                        self.applied.clear();
+                        self.armed = false;
+                        self.mixer.enabled = false;
+                        self.sync_hardware();
+                        return Err(error);
+                    }
                     Ok(self.state())
                 }
             }

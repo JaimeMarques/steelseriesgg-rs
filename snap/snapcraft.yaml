@@ -28,7 +28,7 @@ apps:
     extensions: [gnome]
     common-id: io.github.MrTheSoulz.SSGG
     desktop: usr/share/applications/ssgg.desktop
-    plugs: [audio-playback, hidraw, electron-sandbox]
+    plugs: [audio-playback, pipewire, hidraw, electron-sandbox]
   diagnostics:
     command: bin/ssgg-diagnostics
     plugs: [audio-playback, hidraw]
@@ -56,6 +56,7 @@ parts:
     plugin: nil
     stage-packages:
       - pulseaudio-utils
+      - libpipewire-0.3-0t64
       - libudev1
       - libnss3
       - libnspr4

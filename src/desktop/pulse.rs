@@ -30,16 +30,20 @@ pub fn parse_snapshot(inputs: Value, sinks: Value) -> Result<Snapshot, String> {
         .map(|v| {
             let props = &v["properties"];
             let app_name = text(&props["application.name"]);
-            let app_key = serde_json::to_string(&[
-                text(&props["application.process.binary"]),
-                app_name.clone(),
-                text(&props["media.role"]),
-            ])
-            .map_err(|e| e.to_string())?;
+            let binary = text(&props["application.process.binary"]);
+            let role = text(&props["media.role"]);
+            let id = index(&v["index"])?;
+            // An absent identity must not make unrelated sink-inputs share an assignment.
+            let app_key = if binary.is_empty() && app_name.is_empty() && role.is_empty() {
+                format!("anonymous:{id}")
+            } else {
+                serde_json::to_string(&[binary, app_name.clone(), role]).map_err(|e| e.to_string())?
+            };
             let volume = volume(&v["volume"])?;
             Ok(Stream {
-                id: index(&v["index"])?,
+                id,
                 app_key,
+                generation: None,
                 app_name,
                 name: text(&props["media.name"]),
                 volume,

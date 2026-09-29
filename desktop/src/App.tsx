@@ -2,7 +2,7 @@
 import { useEffect, useRef, useState } from "react";
 import { SlidersHorizontal, Headphones, Settings2, Layers3, Keyboard, Usb, RefreshCw } from "lucide-react";
 import brandIcon from "../assets/branding/ssgg.svg";
-import type { Snapshot, RuntimeInfo, DesktopBridge } from "./shared/contracts";
+import { mutationTimeout, type Snapshot, type RuntimeInfo, type DesktopBridge } from "./shared/contracts";
 import Mixer from "./Mixer";
 import Devices from "./Devices";
 import Profiles from "./Profiles";
@@ -16,29 +16,41 @@ export default function App() {
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState("");
+  const [visible, setVisible] = useState(() => document.visibilityState === "visible");
   const epoch = useRef(0),
     refreshing = useRef(false),
-    mutating = useRef(false);
+    mutating = useRef(false),
+    indeterminate = useRef(false),
+    wheelPolling = useRef(false);
+  wheelPolling.current =
+    tab === "mixer" && visible && !!snapshot?.chatmix.enabled && snapshot.chatmix.inputMode === "hardware";
   async function mutate(action: (bridge: DesktopBridge) => Promise<unknown>, message = "Change saved") {
     if (!window.ssgg || mutating.current) return;
     mutating.current = true;
     epoch.current++;
     setBusy(true);
     setNotice("");
+    indeterminate.current = false;
     try {
       await action(window.ssgg);
       setSnapshot(await window.ssgg.getState());
       setError("");
       setNotice(message);
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Change failed. Try again.");
+      const message = e instanceof Error ? e.message : "Change failed. Try again.";
+      if (message.includes(mutationTimeout)) {
+        indeterminate.current = true;
+        // This read is a snapshot, not proof that the timed-out command has finished.
+        try { setSnapshot(await window.ssgg.getState()); } catch { /* Preserve the last known state and warning. */ }
+      }
+      setError(message);
     } finally {
       mutating.current = false;
       setBusy(false);
     }
   }
 
-  async function refresh() {
+  async function refresh(explicit = false, wheelOnly = false) {
     if (!window.ssgg) {
       setError("Desktop bridge unavailable");
       setLoading(false);
@@ -48,13 +60,19 @@ export default function App() {
     const current = epoch.current;
     refreshing.current = true;
     try {
-      const nextRuntime = await window.ssgg.getRuntime();
-      if (current === epoch.current) setRuntime(nextRuntime);
+      // The fast path reads one service snapshot; runtime inventory stays on the slow cadence.
+      const nextRuntime = wheelOnly ? null : await window.ssgg.getRuntime();
+      if (nextRuntime && current === epoch.current) setRuntime(nextRuntime);
       const next = await window.ssgg.getState();
       if (current === epoch.current) {
-        setRuntime(nextRuntime);
+        if (nextRuntime) setRuntime(nextRuntime);
         setSnapshot(next);
-        setError("");
+        if (!indeterminate.current || explicit) {
+          setError("");
+          if (explicit && indeterminate.current)
+            setNotice("Current state refreshed. A timed-out change may still complete; verify before retrying.");
+          indeterminate.current = false;
+        }
       }
     } catch (e) {
       if (current === epoch.current) {
@@ -69,9 +87,13 @@ export default function App() {
   useEffect(() => {
     void refresh();
     const visibleRefresh = () => {
-      if (document.visibilityState === "visible") void refresh();
+      const isVisible = document.visibilityState === "visible";
+      setVisible(isVisible);
+      if (isVisible) void refresh();
     };
-    const timer = setInterval(visibleRefresh, 2000);
+    const timer = setInterval(() => {
+      if (document.visibilityState === "visible" && !wheelPolling.current) void refresh();
+    }, 2000);
     document.addEventListener("visibilitychange", visibleRefresh);
     return () => {
       epoch.current++;
@@ -79,8 +101,19 @@ export default function App() {
       document.removeEventListener("visibilitychange", visibleRefresh);
     };
   }, []);
+  // Only the visible hardware Mixer needs wheel-rate snapshots. Single-flight refresh
+  // skips busy reads; mutations remain independent and invalidate older responses.
+  useEffect(() => {
+    if (tab !== "mixer" || !visible || !snapshot?.chatmix.enabled || snapshot.chatmix.inputMode !== "hardware") return;
+    const timer = setInterval(() => {
+      void refresh(false, true);
+    }, 200);
+    return () => clearInterval(timer);
+  }, [tab, visible, snapshot?.chatmix.enabled, snapshot?.chatmix.inputMode]);
+  const activeDeviceId =
+    snapshot?.devices.find((device) => device.id === selectedDevice)?.id ?? snapshot?.devices[0]?.id ?? "";
   return (
-    <div className="app-shell">
+    <div className="app-shell" data-page-visible={visible}>
       <aside className="rail">
         <button className="brand" onClick={() => setTab("mixer")} aria-label="SSGG home">
           <span className="brand-mark">
@@ -174,7 +207,7 @@ export default function App() {
                     : "A few preferences. No distractions."}
             </p>
           </div>
-          <button className="icon-button" onClick={() => void refresh()} aria-label="Refresh audio and devices">
+          <button className="icon-button" onClick={() => void refresh(true)} aria-label="Refresh audio and devices">
             <RefreshCw size={18} />
           </button>
         </header>
@@ -192,13 +225,15 @@ export default function App() {
               <strong>{error.includes("Audio service unavailable") ? "Audio service unavailable" : error}</strong>
               <p>
                 {snapshot
-                  ? "The change was not confirmed. Refresh to read the current audio state, then try again."
+                  ? indeterminate.current
+                    ? "The service did not respond in time. The displayed state is a snapshot, not confirmation that the change finished. Refresh and verify before retrying."
+                    : "The change was not confirmed. Refresh to read the current audio state, then try again."
                   : "Check the matching SSGG service, then refresh to reconnect. Controls stay unavailable until a fresh snapshot is received."}
               </p>
             </div>
           </div>
         )}
-        <div className="scene" key={tab}>
+        <div className="scene" key={tab === "devices" ? `devices:${activeDeviceId}` : tab}>
           {tab === "settings" ? (
             <Settings runtime={runtime} onRuntime={setRuntime} />
           ) : tab === "profiles" ? (

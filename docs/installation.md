@@ -2,7 +2,7 @@
 
 ## Ubuntu desktop — recommended
 
-The desktop package targets **Ubuntu 24.04 or newer on amd64**. It needs an active PipeWire-Pulse or PulseAudio desktop session. Ubuntu 22.04 and ARM are not targets of this package.
+The desktop package targets **Ubuntu 24.04 amd64**. On a desktop with a native PipeWire socket, the service defaults to libpipewire; in Pulse-only sessions it uses the legacy PulseAudio/PipeWire-Pulse protocol (`pactl`). The native backend requires a working PipeWire session and `libpipewire-0.3-0t64` (installed by apt with the package); a detected but broken native socket is an error, not a Pulse fallback. Explicit `--audio-backend pulse` or `--audio-backend pipewire` overrides selection. Ubuntu 22.04 and ARM are not targets of this package. Newer Ubuntu versions require their own ABI/runtime validation.
 
 Use the `.deb` supplied with the beta, or extract `ssgg-ubuntu-24.04-amd64` from a successful [Ubuntu desktop build](https://github.com/MrTheSoulz/steelseriesgg-rs/actions/workflows/build-linux.yml). GitHub may require signing in to download CI artifacts. The old CLI/Arch archive is not the Electron installer.
 
@@ -52,7 +52,7 @@ Neither operation deletes your home-directory settings or changes the legacy `ss
 
 ## Snap — experimental
 
-The [strict Snap build](../snap/README.md) is not currently a native-package-equivalent installation route. The tested Ubuntu desktop has no usable hidraw slots for this application, its Electron sandbox requires a publisher policy declaration, and cross-app audio control still needs installed confined testing.
+The [strict Snap build](../snap/README.md) remains experimental and build-only evidence: its native PipeWire plug needs connection/policy approval and does not prove cross-app control. The tested Ubuntu desktop has no usable hidraw slots for this application, and its Electron sandbox requires a publisher policy declaration. Missing Snap HID does not block the supported `.deb` path.
 
 Do not try to solve this with rebooting, broad device permissions, a `raw-usb` connection, `--devmode` or `--no-sandbox`. A classic Snap has different security implications and is not silently substituted. Use the `.deb` for the supported desktop path.
 

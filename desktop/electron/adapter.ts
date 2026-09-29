@@ -2,6 +2,8 @@ import { z } from "zod";
 import {
   snapshotSchema,
   streamSchema,
+  sinkSchema,
+  numericId,
   groupSchema,
   deviceSchema,
   physicalSchema,
@@ -9,7 +11,8 @@ import {
   validateCommand,
 } from "../src/shared/contracts";
 const nativeSnapshot = z.object({
-  streams: z.array(streamSchema.extend({ id: z.number().int().min(0).max(4294967295) })).max(1024),
+  streams: z.array(streamSchema.extend({ id: z.number().int().min(0).max(4294967295), sinkId: z.union([z.number().int().min(0).max(4294967295), numericId]).optional() })).max(1024),
+  sinks: z.array(sinkSchema.extend({ id: z.number().int().min(0).max(4294967295) })).max(256).default([]),
   groups: z.array(groupSchema).max(3),
   devices: z.array(deviceSchema).max(128),
   mixer: z.object({
@@ -27,7 +30,8 @@ export function adaptSnapshot(value: unknown) {
   const native = nativeSnapshot.parse(value);
   return snapshotSchema.parse({
     ...native,
-    streams: native.streams.map((s) => ({ ...s, id: String(s.id) })),
+    streams: native.streams.map((s) => ({ ...s, id: String(s.id), sinkId: s.sinkId === undefined ? undefined : String(s.sinkId) })),
+    sinks: native.sinks.map((sink) => ({ ...sink, id: String(sink.id) })),
     chatmix: {
       ...native.mixer,
       wheelAvailable:
@@ -52,7 +56,7 @@ export function toWireCommand(method: string, params: unknown) {
       .regex(/^(0|[1-9][0-9]*)$/)
       .parse(valid.id);
     const numeric = z.number().int().min(0).max(4294967295).parse(Number(id));
-    return { ...valid, id: numeric };
+    return { ...valid, id: numeric, ...(valid.sinkId === undefined ? {} : { sinkId: Number(valid.sinkId) }) };
   }
   return valid;
 }
