@@ -2,6 +2,8 @@
 pub mod devices;
 pub mod hardware;
 pub mod lighting;
+#[cfg(target_os = "linux")]
+pub mod pipewire;
 pub mod pulse;
 pub mod rpc;
 use serde::{Deserialize, Serialize};
@@ -37,6 +39,9 @@ pub struct Snapshot {
 }
 pub trait Backend {
     fn begin_cycle(&mut self) {}
+    fn backend_name(&self) -> &'static str {
+        "PulseAudio / PipeWire-Pulse"
+    }
     fn snapshot(&mut self) -> Result<Snapshot, String>;
     fn set_stream(
         &mut self,
@@ -57,6 +62,16 @@ pub trait Backend {
             return Err("Physical headset unavailable; audio write cancelled".into());
         }
         self.set_stream(id, volume, muted, sink)
+    }
+    fn set_stream_guarded_owned(
+        &mut self,
+        id: u32,
+        volume: Option<f64>,
+        muted: Option<bool>,
+        sink: Option<u32>,
+        allowed: std::sync::Arc<dyn Fn() -> bool + Send + Sync>,
+    ) -> Result<(), String> {
+        self.set_stream_guarded(id, volume, muted, sink, &*allowed)
     }
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -521,7 +536,7 @@ impl<B: Backend> Service<B> {
                     if let Some(sink) = self.snapshot.sinks.iter().find(|s| &s.name == name) {
                         if sink.id != stream.sink_id {
                             self.backend
-                                .set_stream_guarded(stream.id, None, None, Some(sink.id), &*guard)
+                                .set_stream_guarded_owned(stream.id, None, None, Some(sink.id), guard.clone())
                                 .map_err(RpcError::backend)?;
                         }
                     }
@@ -553,7 +568,7 @@ impl<B: Backend> Service<B> {
             );
             if gain.is_some() || mute.is_some() {
                 self.backend
-                    .set_stream_guarded(stream.id, gain, mute, None, &*guard)
+                    .set_stream_guarded_owned(stream.id, gain, mute, None, guard.clone())
                     .map_err(RpcError::backend)?;
             }
             if let Some(a) = self.applied.get_mut(&stream.id) {
@@ -569,7 +584,7 @@ impl<B: Backend> Service<B> {
             Err(e) => (Vec::new(), Some(e.to_string())),
         };
         self.lighting.decorate(&mut devices);
-        json!({"streams":self.snapshot.streams,"sinks":self.snapshot.sinks,"groups":self.groups,"mixer":self.mixer,"physical":self.physical,"settings":self.settings,"profiles":self.profile_names(),"devices":devices,"deviceError":device_error,"backend":{"name":"PulseAudio / PipeWire-Pulse","connected":error.is_none(),"error":error}})
+        json!({"streams":self.snapshot.streams,"sinks":self.snapshot.sinks,"groups":self.groups,"mixer":self.mixer,"physical":self.physical,"settings":self.settings,"profiles":self.profile_names(),"devices":devices,"deviceError":device_error,"backend":{"name":self.backend.backend_name(),"connected":error.is_none(),"error":error}})
     }
     fn dispatch(&mut self, method: &str, params: Value) -> Result<Value, RpcError> {
         if self.read_only
