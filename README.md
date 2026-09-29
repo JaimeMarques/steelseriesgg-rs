@@ -8,7 +8,7 @@ This is the [MrTheSoulz fork](https://github.com/MrTheSoulz/steelseriesgg-rs) of
 
 ## Install on Ubuntu
 
-**Ubuntu 24.04 amd64 is the verified package baseline; the default mixer uses PipeWire-Pulse or PulseAudio.** A native PipeWire backend is available as an explicit, separately validated service mode (see [usage](docs/usage.md#applications-and-browser-tabs)). Newer Ubuntu versions need their own runtime validation.
+**Ubuntu 24.04 amd64 is the verified package baseline.** The service defaults to native libpipewire when a native socket exists, otherwise PulseAudio/PipeWire-Pulse (`pactl`); either can be selected explicitly (see [usage](docs/usage.md#applications-and-browser-tabs)). A broken detected native socket is reported, not silently retried over Pulse. Newer Ubuntu versions need their own runtime validation.
 
 Use the `.deb` supplied with the beta build. CI packages are available in the `ssgg-ubuntu-24.04-amd64` artifact of a successful [Ubuntu desktop build](https://github.com/MrTheSoulz/steelseriesgg-rs/actions/workflows/build-linux.yml). Extract that download to get the `.deb`; do not use an artifact from a failed run as a tested release.
 

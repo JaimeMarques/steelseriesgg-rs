@@ -2,7 +2,7 @@
 
 ## Ubuntu desktop — recommended
 
-The desktop package targets **Ubuntu 24.04 amd64**. The default mixer uses a PipeWire-Pulse or PulseAudio session; the opt-in native backend requires a PipeWire session and `libpipewire-0.3-0t64` (installed by apt with the package). Ubuntu 22.04 and ARM are not targets of this package. Newer Ubuntu versions require their own ABI/runtime validation.
+The desktop package targets **Ubuntu 24.04 amd64**. On a desktop with a native PipeWire socket, the service defaults to libpipewire; in Pulse-only sessions it uses the legacy PulseAudio/PipeWire-Pulse protocol (`pactl`). The native backend requires a working PipeWire session and `libpipewire-0.3-0t64` (installed by apt with the package); a detected but broken native socket is an error, not a Pulse fallback. Explicit `--audio-backend pulse` or `--audio-backend pipewire` overrides selection. Ubuntu 22.04 and ARM are not targets of this package. Newer Ubuntu versions require their own ABI/runtime validation.
 
 Use the `.deb` supplied with the beta, or extract `ssgg-ubuntu-24.04-amd64` from a successful [Ubuntu desktop build](https://github.com/MrTheSoulz/steelseriesgg-rs/actions/workflows/build-linux.yml). GitHub may require signing in to download CI artifacts. The old CLI/Arch archive is not the Electron installer.
 

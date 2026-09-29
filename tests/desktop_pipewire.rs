@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 use steelseries_gg::desktop::{Backend, pipewire::PipeWireBackend};
 
 #[test]
-fn native_selection_is_explicit_and_pulse_is_default() {
+fn backend_selection_supports_explicit_overrides_without_forcing_pulse_default() {
     let help = Command::new(env!("CARGO_BIN_EXE_ssgg-desktop"))
         .arg("--help")
         .output()
@@ -13,7 +13,92 @@ fn native_selection_is_explicit_and_pulse_is_default() {
     let text = String::from_utf8(help.stdout).unwrap();
     assert!(text.contains("--audio-backend"));
     assert!(text.contains("pipewire"));
-    assert!(text.contains("default: pulse"));
+    assert!(!text.contains("default: pulse"));
+}
+
+fn backend_name(
+    args: &[&str],
+    runtime: &std::path::Path,
+    remote: &str,
+    pipewire_runtime: Option<&std::path::Path>,
+) -> std::process::Output {
+    use std::io::Write;
+    use std::process::Stdio;
+    let config = tempfile::tempdir().unwrap();
+    let mut command = Command::new(env!("CARGO_BIN_EXE_ssgg-desktop"));
+    if let Some(private) = pipewire_runtime {
+        command.env("PIPEWIRE_RUNTIME_DIR", private);
+    } else {
+        command.env_remove("PIPEWIRE_RUNTIME_DIR");
+    }
+    let mut child = command
+        .args(args)
+        .args(["--stdio", "--config"])
+        .arg(config.path().join("state.json"))
+        .env("XDG_RUNTIME_DIR", runtime)
+        .env("PIPEWIRE_REMOTE", remote)
+        .env("PULSE_SERVER", "unix:/nonexistent/ssgg-pulse")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(b"{\"id\":1,\"method\":\"state.get\",\"params\":{}}\n")
+        .unwrap();
+    child.wait_with_output().unwrap()
+}
+
+#[test]
+fn absent_native_socket_defaults_to_pulse_over_rpc() {
+    let runtime = tempfile::tempdir().unwrap();
+    let output = backend_name(&[], runtime.path(), "pipewire-0", None);
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    let response: serde_json::Value =
+        serde_json::from_slice(output.stdout.split(|&c| c == b'\n').next().unwrap()).unwrap();
+    assert_eq!(response["result"]["backend"]["name"], "PulseAudio / PipeWire-Pulse");
+}
+
+#[test]
+fn detected_unresponsive_native_socket_fails_without_pulse_fallback() {
+    let runtime = tempfile::tempdir().unwrap();
+    let _listener = std::os::unix::net::UnixListener::bind(runtime.path().join("pipewire-0")).unwrap();
+    let output = backend_name(&[], runtime.path(), "pipewire-0", None);
+    assert!(!output.status.success(), "{}", String::from_utf8_lossy(&output.stdout));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("native PipeWire unavailable"));
+}
+
+#[test]
+fn explicit_pulse_bypasses_detected_native_socket() {
+    let runtime = tempfile::tempdir().unwrap();
+    let _listener = std::os::unix::net::UnixListener::bind(runtime.path().join("pipewire-0")).unwrap();
+    let output = backend_name(&["--audio-backend", "pulse"], runtime.path(), "pipewire-0", None);
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    let response: serde_json::Value =
+        serde_json::from_slice(output.stdout.split(|&c| c == b'\n').next().unwrap()).unwrap();
+    assert_eq!(response["result"]["backend"]["name"], "PulseAudio / PipeWire-Pulse");
+}
+
+#[test]
+fn detected_custom_remote_fails_closed() {
+    let runtime = tempfile::tempdir().unwrap();
+    let _listener = std::os::unix::net::UnixListener::bind(runtime.path().join("named-core")).unwrap();
+    let output = backend_name(&[], runtime.path(), "named-core", None);
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("native PipeWire unavailable"));
+}
+
+#[test]
+fn pipewire_runtime_dir_and_custom_remote_take_precedence_over_xdg_runtime() {
+    let xdg_runtime = tempfile::tempdir().unwrap();
+    let native_runtime = tempfile::tempdir().unwrap();
+    let _listener = std::os::unix::net::UnixListener::bind(native_runtime.path().join("named-core")).unwrap();
+    let output = backend_name(&[], xdg_runtime.path(), "named-core", Some(native_runtime.path()));
+    assert!(!output.status.success(), "{}", String::from_utf8_lossy(&output.stdout));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("native PipeWire unavailable"));
 }
 
 #[test]
@@ -176,7 +261,7 @@ fn private_guard_revoked_while_queued_prevents_native_write() {
 }
 
 #[test]
-fn selected_private_service_reports_native_backend_over_rpc() {
+fn private_service_defaults_to_native_backend_over_rpc() {
     use std::io::Write;
     use std::process::Stdio;
     let Some(runtime) = std::env::var_os("SSGG_PRIVATE_PW_RUNTIME") else {
@@ -184,8 +269,9 @@ fn selected_private_service_reports_native_backend_over_rpc() {
     };
     let config = tempfile::tempdir().unwrap();
     let mut child = Command::new(env!("CARGO_BIN_EXE_ssgg-desktop"))
-        .args(["--audio-backend", "pipewire", "--pipewire-runtime"])
-        .arg(&runtime)
+        .env("XDG_RUNTIME_DIR", &runtime)
+        .env("PIPEWIRE_RUNTIME_DIR", &runtime)
+        .env("PIPEWIRE_REMOTE", "pipewire-0")
         .arg("--config")
         .arg(config.path().join("state.json"))
         .arg("--stdio")

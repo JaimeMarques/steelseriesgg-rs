@@ -3,6 +3,7 @@
 fn main() -> anyhow::Result<()> {
     use anyhow::{Context, anyhow};
     use clap::{Parser, ValueEnum};
+    use std::os::unix::fs::FileTypeExt;
     use std::path::PathBuf;
     use steelseries_gg::desktop::{Backend, Service, Snapshot, pipewire::PipeWireBackend, pulse::PulseBackend, rpc};
     #[derive(Clone, Copy, ValueEnum)]
@@ -75,11 +76,11 @@ fn main() -> anyhow::Result<()> {
     #[derive(Parser)]
     #[command(
         name = "ssgg-desktop",
-        about = "Private desktop audio RPC service (Pulse default; experimental native PipeWire opt-in)"
+        about = "Private desktop audio RPC service (native PipeWire when its socket exists; otherwise Pulse)"
     )]
     struct Args {
-        #[arg(long, value_enum, default_value_t = AudioBackendChoice::Pulse)]
-        audio_backend: AudioBackendChoice,
+        #[arg(long, value_enum)]
+        audio_backend: Option<AudioBackendChoice>,
         #[arg(long, requires = "audio_backend")]
         pipewire_runtime: Option<PathBuf>,
         #[arg(long)]
@@ -100,7 +101,22 @@ fn main() -> anyhow::Result<()> {
             .ok_or_else(|| anyhow!("HOME or XDG_CONFIG_HOME required"))?
             .join("ssgg-desktop/state.json"),
     };
-    let backend = match args.audio_backend {
+    let native_socket = std::env::var_os("PIPEWIRE_RUNTIME_DIR")
+        .or_else(|| std::env::var_os("XDG_RUNTIME_DIR"))
+        .map(|runtime| {
+            PathBuf::from(runtime).join(std::env::var_os("PIPEWIRE_REMOTE").unwrap_or_else(|| "pipewire-0".into()))
+        });
+    let choice = args.audio_backend.unwrap_or_else(|| {
+        if native_socket
+            .as_ref()
+            .is_some_and(|socket| std::fs::metadata(socket).is_ok_and(|metadata| metadata.file_type().is_socket()))
+        {
+            AudioBackendChoice::Pipewire
+        } else {
+            AudioBackendChoice::Pulse
+        }
+    });
+    let backend = match choice {
         AudioBackendChoice::Pulse => {
             if args.pipewire_runtime.is_some() {
                 return Err(anyhow!("--pipewire-runtime requires --audio-backend pipewire"));

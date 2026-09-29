@@ -4,7 +4,7 @@ Developer guide for the Electron + React + TypeScript console. For ordinary use,
 
 ## Build and launch locally
 
-Prerequisites: Linux, Node/npm, the repository's Rust toolchain and native build dependencies, a running PipeWire-Pulse or PulseAudio session, and **pactl** (`pulseaudio-utils` on Debian/Ubuntu; `libpulse` on Arch) for the default legacy mixer. The opt-in native backend requires PipeWire, `libpipewire-0.3-dev`, `libspa-0.2-dev`, libclang during compilation and `libpipewire-0.3-0t64` at runtime on Ubuntu 24.04. Electron needs the usual GTK/NSS/GBM libraries and a working Chromium sandbox. `xvfb` is only needed for headless smoke tests.
+Prerequisites: Linux, Node/npm, the repository's Rust toolchain and native build dependencies. The native default requires a running PipeWire core, `libpipewire-0.3-dev`, `libspa-0.2-dev`, libclang during compilation and `libpipewire-0.3-0t64` at runtime on Ubuntu 24.04. Pulse-only sessions use **pactl** (`pulseaudio-utils` on Debian/Ubuntu; `libpulse` on Arch). Electron needs the usual GTK/NSS/GBM libraries and a working Chromium sandbox. `xvfb` is only needed for headless smoke tests.
 
 ```sh
 cd desktop
@@ -38,7 +38,7 @@ npm run test:packaging
 
 Packaging compiles Rust for generic `x86-64`, overriding inherited developer CPU tuning, and always extracts the checksum-verified official Electron archive, never a development `node_modules/electron/dist` tree. A custom `--sidecar` must already be built for the intended CPU baseline; ELF architecture/GLIBC checks alone cannot certify every instruction in an externally supplied binary. It checks ELF architecture/GLIBC requirements, rejects shipped symlinks, and validates the desktop entry and AppArmor syntax. The standalone output is `release/app`; unprivileged extraction cannot establish the root ownership of the DEB's sandbox helper.
 
-The Ubuntu CI job runs both legacy and opt-in native backends against separate private PipeWire cores, checks the native ELF dependency and DEB runtime dependency, installs the DEB on a disposable runner, runs the installed native sidecar against a private core, launches the actual packaged binary in a private session without a helper override, and purges it while checking that user data survives. Archive inspection and local extraction tests alone do not certify fresh installation, Wayland/GNOME Shell behavior or hardware access.
+The Ubuntu CI job runs both legacy and native backends against separate private PipeWire cores, checks the native ELF dependency and DEB runtime dependency, installs the DEB on a disposable runner, runs the installed native sidecar against a private core, launches the actual packaged binary in a private session without a helper override, and purges it while checking that user data survives. Archive inspection and local extraction tests alone do not certify fresh installation, Wayland/GNOME Shell behavior or hardware access.
 
 Snap builds consume the same standalone tree; see the [Snap guide](../snap/README.md). Strict confinement's HID, browser-sandbox and cross-app audio limitations are release gates, not errors to bypass.
 
@@ -48,14 +48,17 @@ To keep mixing when the GUI quits, start the standalone Rust service **before** 
 
 ```sh
 # In its own terminal; no installer or systemd changes:
-./local-bin/ssgg-desktop                              # Pulse-compatible default
-# Or use native PipeWire explicitly (do not run both services):
+./local-bin/ssgg-desktop                              # native PipeWire if socket exists; otherwise Pulse
+# Override if needed (do not run both services):
+./local-bin/ssgg-desktop --audio-backend pulse
 ./local-bin/ssgg-desktop --audio-backend pipewire
 # Then, in another terminal:
 npm run launch
 ```
 
 The daemon listens at `$XDG_RUNTIME_DIR/ssgg-desktop/service.sock`. Electron prefers this socket after checking owner, filesystem type, no symlinks at the runtime directory/service directory/socket, and private permissions (0700 directories, 0600 socket). Renderer IPC cannot select a socket or executable. There is no TCP listener started by production code.
+
+Native selection checks `$PIPEWIRE_RUNTIME_DIR/${PIPEWIRE_REMOTE:-pipewire-0}` (or `$XDG_RUNTIME_DIR` if `PIPEWIRE_RUNTIME_DIR` is unset). A detected native socket whose connection/readback fails stops startup; it never falls back to Pulse. Use `--audio-backend pulse` only when you explicitly want the legacy protocol.
 
 A connected external service is **never killed or reset on GUI quit**. A window-owned `--stdio` sidecar is used only when no socket is available, and is labelled accordingly. A failed/untrusted existing socket is an error, not permission to start a competing service. After a previously attached service disappears, refresh retries the socket without falling back to a competitor. Reopening a hidden window also resumes polling/reconnection. Config-lock conflicts show a specific recovery message.
 
@@ -87,7 +90,7 @@ The tray preference is local desktop state. “Keep running in the tray” hides
 ```sh
 PYTHONPATH=tests python3 -m unittest tests/test_desktop_pipewire_config.py
 node --test tests/native-packaging.test.mjs
-# Only after building the integrated --audio-backend pipewire sidecar; this
+# Only after building the integrated native-capable sidecar; this
 # starts owned private daemons/null sinks and NEVER writes to host audio:
 python3 tests/desktop_pipewire_isolated.py
 npm test

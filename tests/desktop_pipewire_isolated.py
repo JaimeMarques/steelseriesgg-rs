@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Opt-in native PipeWire E2E, exclusively against owned, policy-only daemons.
+"""Native PipeWire default E2E, exclusively against owned, policy-only daemons.
 
-Requires a staged target/debug/ssgg-desktop with --audio-backend pipewire.
+Requires a staged target/debug/ssgg-desktop with native PipeWire support.
 The Pulse protocol is used ONLY by pacat/pactl to create and identify the fixture.
 All service mutations and assertions use native PipeWire nodes/metadata.
 """
@@ -172,7 +172,7 @@ context.modules = [
                 wait(lambda: assert_native(1.5), "native fixture 150% readback")
                 print(json.dumps({"result": "fixture-only", "backend_tested": False, "host_audio_mutated": False}))
                 return
-            sidecar = spawn([str(binary), "--stdio", "--audio-backend", "pipewire", "--config", str(root / "desktop/state.json")],
+            sidecar = spawn([str(binary), "--stdio", "--config", str(root / "desktop/state.json")],
                             stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, bufsize=1)
             assert sidecar.stdin is not None and sidecar.stdout is not None
             sequence = 0
@@ -200,6 +200,7 @@ context.modules = [
                 return response["result"]
 
             state = rpc("state.get")
+            assert state["backend"]["name"] == "Native PipeWire", state
             assert {s["name"] for s in state["sinks"]} == {"test_a", "test_b"}, state
             assert len(state["streams"]) == 1, state
             stream = state["streams"][0]
