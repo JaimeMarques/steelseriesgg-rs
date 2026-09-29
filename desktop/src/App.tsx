@@ -16,10 +16,14 @@ export default function App() {
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState("");
+  const [visible, setVisible] = useState(() => document.visibilityState === "visible");
   const epoch = useRef(0),
     refreshing = useRef(false),
     mutating = useRef(false),
-    indeterminate = useRef(false);
+    indeterminate = useRef(false),
+    wheelPolling = useRef(false);
+  wheelPolling.current =
+    tab === "mixer" && visible && !!snapshot?.chatmix.enabled && snapshot.chatmix.inputMode === "hardware";
   async function mutate(action: (bridge: DesktopBridge) => Promise<unknown>, message = "Change saved") {
     if (!window.ssgg || mutating.current) return;
     mutating.current = true;
@@ -46,7 +50,7 @@ export default function App() {
     }
   }
 
-  async function refresh(explicit = false) {
+  async function refresh(explicit = false, wheelOnly = false) {
     if (!window.ssgg) {
       setError("Desktop bridge unavailable");
       setLoading(false);
@@ -56,11 +60,12 @@ export default function App() {
     const current = epoch.current;
     refreshing.current = true;
     try {
-      const nextRuntime = await window.ssgg.getRuntime();
-      if (current === epoch.current) setRuntime(nextRuntime);
+      // The fast path reads one service snapshot; runtime inventory stays on the slow cadence.
+      const nextRuntime = wheelOnly ? null : await window.ssgg.getRuntime();
+      if (nextRuntime && current === epoch.current) setRuntime(nextRuntime);
       const next = await window.ssgg.getState();
       if (current === epoch.current) {
-        setRuntime(nextRuntime);
+        if (nextRuntime) setRuntime(nextRuntime);
         setSnapshot(next);
         if (!indeterminate.current || explicit) {
           setError("");
@@ -82,9 +87,13 @@ export default function App() {
   useEffect(() => {
     void refresh();
     const visibleRefresh = () => {
-      if (document.visibilityState === "visible") void refresh();
+      const isVisible = document.visibilityState === "visible";
+      setVisible(isVisible);
+      if (isVisible) void refresh();
     };
-    const timer = setInterval(visibleRefresh, 2000);
+    const timer = setInterval(() => {
+      if (document.visibilityState === "visible" && !wheelPolling.current) void refresh();
+    }, 2000);
     document.addEventListener("visibilitychange", visibleRefresh);
     return () => {
       epoch.current++;
@@ -92,8 +101,19 @@ export default function App() {
       document.removeEventListener("visibilitychange", visibleRefresh);
     };
   }, []);
+  // Only the visible hardware Mixer needs wheel-rate snapshots. Single-flight refresh
+  // skips busy reads; mutations remain independent and invalidate older responses.
+  useEffect(() => {
+    if (tab !== "mixer" || !visible || !snapshot?.chatmix.enabled || snapshot.chatmix.inputMode !== "hardware") return;
+    const timer = setInterval(() => {
+      void refresh(false, true);
+    }, 200);
+    return () => clearInterval(timer);
+  }, [tab, visible, snapshot?.chatmix.enabled, snapshot?.chatmix.inputMode]);
+  const activeDeviceId =
+    snapshot?.devices.find((device) => device.id === selectedDevice)?.id ?? snapshot?.devices[0]?.id ?? "";
   return (
-    <div className="app-shell">
+    <div className="app-shell" data-page-visible={visible}>
       <aside className="rail">
         <button className="brand" onClick={() => setTab("mixer")} aria-label="SSGG home">
           <span className="brand-mark">
@@ -213,7 +233,7 @@ export default function App() {
             </div>
           </div>
         )}
-        <div className="scene" key={tab}>
+        <div className="scene" key={tab === "devices" ? `devices:${activeDeviceId}` : tab}>
           {tab === "settings" ? (
             <Settings runtime={runtime} onRuntime={setRuntime} />
           ) : tab === "profiles" ? (
