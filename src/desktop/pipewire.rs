@@ -145,10 +145,18 @@ fn graph_worker(socket: PathBuf, receiver: Receiver<Request>) {
         let core = context
             .connect_fd_rc(OwnedFd::from(stream), None)
             .map_err(|e| e.to_string())?;
+        let server_version = Rc::new(RefCell::new(None::<String>));
+        let reported_version = server_version.clone();
+        let core_info_listener = core
+            .add_listener_local()
+            .info(move |info| *reported_version.borrow_mut() = Some(info.version().to_owned()))
+            .register();
         Ok(Graph {
             mainloop,
             _context: context,
+            _core_info_listener: core_info_listener,
             core,
+            server_version,
             known: BTreeMap::new(),
             sink_serials: BTreeMap::new(),
         })
@@ -176,7 +184,9 @@ fn graph_worker(socket: PathBuf, receiver: Receiver<Request>) {
 struct Graph {
     mainloop: pw::main_loop::MainLoopRc,
     _context: pw::context::ContextRc,
+    _core_info_listener: pw::core::Listener,
     core: pw::core::CoreRc,
+    server_version: Rc<RefCell<Option<String>>>,
     known: BTreeMap<u32, (String, Vec<f32>, f64)>,
     sink_serials: BTreeMap<u32, String>,
 }
@@ -243,6 +253,19 @@ fn linked_sink(sinks: &[u32]) -> Result<u32, String> {
 }
 fn routable_sink(linked: &[u32], available: &[u32]) -> Option<u32> {
     linked_sink(linked).ok().filter(|id| available.contains(id))
+}
+fn supports_route_generation_fence(version: &str) -> bool {
+    let mut parts = version.split('.');
+    let Some(major) = parts.next().and_then(|part| part.parse::<u32>().ok()) else {
+        return false;
+    };
+    let Some(minor) = parts.next().and_then(|part| part.parse::<u32>().ok()) else {
+        return false;
+    };
+    let Some(patch) = parts.next().and_then(|part| part.parse::<u32>().ok()) else {
+        return false;
+    };
+    parts.next().is_none() && (major, minor, patch) >= (1, 0, 5)
 }
 fn same_generation(expected: &str, current: &str) -> Result<(), String> {
     if expected.is_empty() || current != expected {
@@ -652,6 +675,18 @@ impl Graph {
         {
             return Err("PipeWire stream or sink generation changed; no routing command sent".into());
         }
+        if !self
+            .server_version
+            .borrow()
+            .as_deref()
+            .is_some_and(supports_route_generation_fence)
+        {
+            return Err("Native routing requires a verified PipeWire registry-generation fence (1.0.5+)".into());
+        }
+        // Our final registry roundtrip observed both globals. In PipeWire 1.0.5+
+        // metadata_set_property checks the subject through the client's received
+        // registry generation (impl-client.c); a newer recycled global is ESTALE.
+        // This is not an atomic object.serial compare-and-set on all servers.
         if allowed.is_some_and(|guard| !guard()) || Instant::now() >= expires {
             return Err(
                 "Physical headset unavailable or native route deadline expired; no routing command sent".into(),
@@ -733,6 +768,15 @@ impl NodeView {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn native_metadata_routing_requires_verified_registry_generation_fence() {
+        assert!(super::supports_route_generation_fence("1.0.5"));
+        assert!(super::supports_route_generation_fence("1.6.2"));
+        assert!(!super::supports_route_generation_fence("1.0.4"));
+        assert!(!super::supports_route_generation_fence("0.3.80"));
+        assert!(!super::supports_route_generation_fence("unknown"));
+    }
+
     #[test]
     fn scalar_only_playback_props_are_valid_and_writable() {
         assert!((super::gain_from_props(0.125, &[]).unwrap() - 0.5).abs() < 0.0001);

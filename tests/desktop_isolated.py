@@ -146,7 +146,7 @@ def run():
             null_input = open("/dev/zero", "rb")
             app = spawn([pacat, "--playback", "--raw", "--device=test_a", "--client-name=SSGG-Isolated-Game", "--stream-name=Silence", "--property=media.role=game"], stdin=null_input, stdout=logs)
             wait(lambda: any(s["sink"] != 4294967295 for s in json.loads(pa("-f", "json", "list", "sink-inputs"))))
-            sidecar = spawn([binary, "--stdio", "--config", str(root / "desktop/state.json")], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, bufsize=1)
+            sidecar = spawn([binary, "--stdio", "--audio-backend", "pulse", "--config", str(root / "desktop/state.json")], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, bufsize=1)
             assert sidecar.stdin is not None and sidecar.stdout is not None
             counter = 0
 
@@ -163,6 +163,7 @@ def run():
                 return response["result"]
 
             state = rpc("state.get")
+            assert state["backend"]["name"] == "PulseAudio / PipeWire-Pulse", "legacy regression must exercise the Pulse backend"
             assert len(state["streams"]) == 1 and len(state["sinks"]) == 2, state
             stream_id = state["streams"][0]["id"]
             pa("set-sink-input-volume", str(stream_id), "98304")
