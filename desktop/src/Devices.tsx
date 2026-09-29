@@ -131,7 +131,7 @@ export default function Devices({
         <div className="device-story">
           <div className={"connection-pill " + (device.connected ? "connected" : "")}>
             <span className="status-dot" />
-            {device.connected ? "Receiver connected" : "Disconnected"}
+            {device.connected ? (device.kind === "headset" ? "Receiver connected" : "Device connected") : "Disconnected"}
           </div>
           <h2>{device.name}</h2>
           <p className="device-kind">
@@ -165,8 +165,9 @@ export default function Devices({
               <div>
                 <strong>Source implemented</strong>
                 <p>
-                  Battery, ChatMix input, sidetone and auto-off have source-derived support. Hardware validation is
-                  pending; receiver detection is not command verification.
+                  {device.kind === "headset"
+                    ? "Battery, ChatMix input, sidetone and auto-off have source-derived support. Hardware validation is pending; receiver detection is not command verification."
+                    : "This exact keyboard has source-derived RGB support. Physical lighting validation is pending; a matching photograph does not verify device commands."}
                 </p>
               </div>
             </div>
@@ -180,7 +181,7 @@ export default function Devices({
       )}
       <p className="artwork-credit">
         {artwork
-          ? `${artwork.attribution} Official image shows the black variant; USB does not identify casing color. Download contacts the manufacturer's image CDN only when requested.`
+          ? `${artwork.attribution} ${artwork.variant}. Download contacts the manufacturer's image CDN only when requested.`
           : "No verified manufacturer photo is catalogued for this exact model. Choose your own image; SSGG will not substitute a different model."}
       </p>
       <section className="hardware-controls">
