@@ -114,7 +114,10 @@ context.modules = [
                     value = check()
                     if value:
                         return value
-                except (OSError, subprocess.SubprocessError, AssertionError) as error:
+                except (OSError, subprocess.SubprocessError, AssertionError, json.JSONDecodeError) as error:
+                    # Noble's pw-dump can emit two JSON snapshots while the graph
+                    # changes between a stream removal and replacement. A bounded
+                    # retry must wait for one complete settled inventory.
                     last = error
                 time.sleep(0.05)
             raise AssertionError(f"Timed out waiting for {description}: {last}")
